@@ -2,11 +2,34 @@
 
 A modular monolith for running a multi-store retail and convenience business: store ordering, warehouse fulfillment, purchasing and receiving, direct store delivery, production, inventory, pricing and promotions, fuel, point-of-sale sales import, and a general ledger that serves as the book of record.
 
-**Status:** specification. Implementation starts with the Phase 0 foundation described in the PRD.
+**Status:** scaffold. The build, quality gates, and an empty package for every module are in place; business logic follows in the phases described in the PRD.
 
 ## Documentation
 
 - [Product requirements](docs/prd.md): scope, architecture, module design, event catalog, accounting, and delivery phases.
+
+## Getting started
+
+Requires a Java 25 JDK (Eclipse Temurin). Everything else comes from the Gradle wrapper.
+
+```bash
+./gradlew build
+```
+
+runs compilation, Detekt, ktlint, the tests (including Spring Modulith module verification), and the Kover coverage gate. Any warning or finding fails the build.
+
+```bash
+./gradlew :app:bootRun
+```
+
+starts the application with the `local` profile on port 8080. The `local` profile needs no Azure access. Health is at `/actuator/health`.
+
+## Repository layout
+
+- `app/`: the single application module. Each business module is a package under `com.retailplatform` declared in its `package-info.kt`.
+- `build-logic/`: Gradle convention plugins (`retail.kotlin-conventions`, `retail.spring-conventions`, `retail.quality-conventions`, `retail.test-conventions`).
+- `gradle/libs.versions.toml`: the version catalog, the one place to change versions.
+- `config/detekt/`: Detekt rule overrides.
 
 ## Technology
 
