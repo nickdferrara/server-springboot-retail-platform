@@ -1,0 +1,10 @@
+# Azure production environment. Environment-specific settings and secrets are supplied by the platform, never by this file.
+management:
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: WARN
+    com.retailplatform: INFO

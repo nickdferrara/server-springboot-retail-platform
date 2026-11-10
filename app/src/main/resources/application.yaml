@@ -1,0 +1,24 @@
+spring:
+  application:
+    name: retail-platform
+  profiles:
+    # Environments set SPRING_PROFILES_ACTIVE to dev, test, or prod. A plain start on a workstation is local.
+    default: local
+  threads:
+    virtual:
+      enabled: true
+  lifecycle:
+    timeout-per-shutdown-phase: 30s
+
+server:
+  shutdown: graceful
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
