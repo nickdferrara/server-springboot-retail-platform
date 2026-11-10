@@ -1,0 +1,15 @@
+# Overrides on top of the Detekt default rule set. Any finding fails the build.
+
+config:
+  validation: true
+  warningsAsErrors: true
+
+naming:
+  MatchingDeclarationName:
+    # package-info.kt holds the Spring Modulith module declaration for its package.
+    excludes: ['**/package-info.kt']
+
+performance:
+  SpreadOperator:
+    # Forwarding `args` to runApplication is the only use of the spread operator.
+    excludes: ['**/RetailApplication.kt']
