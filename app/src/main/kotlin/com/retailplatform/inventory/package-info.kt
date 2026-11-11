@@ -9,6 +9,6 @@ import org.springframework.modulith.PackageInfo
 @PackageInfo
 @ApplicationModule(
     displayName = "Inventory",
-    allowedDependencies = ["shared", "platform", "catalog :: events", "locations :: api"],
+    allowedDependencies = ["shared", "platform", "catalog :: events", "locations :: api", "receiving :: events"],
 )
 internal class ModuleMetadata
