@@ -8,3 +8,8 @@ logging:
   level:
     root: WARN
     com.retailplatform: INFO
+
+spring:
+  datasource:
+    url: ${DATABASE_URL}
+    username: ${DATABASE_USERNAME}

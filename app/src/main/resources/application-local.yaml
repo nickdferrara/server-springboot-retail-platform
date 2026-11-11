@@ -2,6 +2,17 @@
 server:
   port: 8080
 
+spring:
+  # Matches docker/docker-compose.yml. These are throwaway credentials for a database on the developer's machine.
+  datasource:
+    url: jdbc:postgresql://localhost:5432/retail
+    username: retail
+    password: retail
+  docker:
+    compose:
+      # `./gradlew :app:bootRun` starts these containers and stops them on exit.
+      file: docker/docker-compose.yml
+
 management:
   endpoint:
     health:

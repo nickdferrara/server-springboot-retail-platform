@@ -9,6 +9,16 @@ spring:
       enabled: true
   lifecycle:
     timeout-per-shutdown-phase: 30s
+  flyway:
+    # Migrations run once per module; see ModuleMigrationConfiguration.
+    locations: classpath:db/migration
+  modulith:
+    events:
+      jdbc:
+        # The registry table is created by the platform module's Flyway migration.
+        schema: platform
+        schema-initialization:
+          enabled: false
 
 server:
   shutdown: graceful
