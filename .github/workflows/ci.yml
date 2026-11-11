@@ -66,3 +66,16 @@ jobs:
 
       - name: Image runs as a non-root user
         run: test "$(docker inspect --format '{{.Config.User}}' retail-platform:ci)" = "10001:10001"
+
+  infra:
+    name: infra
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Compile Bicep templates
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep build-params --file infra/dev.bicepparam --stdout > /dev/null
