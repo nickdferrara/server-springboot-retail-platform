@@ -9,6 +9,6 @@ import org.springframework.modulith.PackageInfo
 @PackageInfo
 @ApplicationModule(
     displayName = "Receiving",
-    allowedDependencies = ["shared", "platform"],
+    allowedDependencies = ["shared", "platform", "purchasing :: events"],
 )
 internal class ModuleMetadata

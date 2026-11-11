@@ -79,3 +79,13 @@ value class InventoryMovementId private constructor(
 
     companion object : TypedIdFactory<InventoryMovementId>(::InventoryMovementId)
 }
+
+/** Identifies a receipt of goods against a purchase order. */
+@JvmInline
+value class ReceiptId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<ReceiptId>(::ReceiptId)
+}

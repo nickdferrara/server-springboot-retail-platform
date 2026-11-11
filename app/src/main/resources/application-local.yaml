@@ -36,3 +36,4 @@ retail:
         - Accounting.Manager
         - Pricing.Analyst
         - Inventory.Controller
+        - Receiving.Clerk
