@@ -89,3 +89,13 @@ value class ReceiptId private constructor(
 
     companion object : TypedIdFactory<ReceiptId>(::ReceiptId)
 }
+
+/** Identifies an accrual for goods received and not yet invoiced. */
+@JvmInline
+value class AccrualId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<AccrualId>(::AccrualId)
+}

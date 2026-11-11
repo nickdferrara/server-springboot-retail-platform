@@ -17,8 +17,9 @@ import java.time.Duration
 import java.time.LocalDate
 
 /**
- * End to end across purchasing, receiving, and inventory: a purchase order sent to a vendor is received at the
- * warehouse dock in two deliveries, and the goods arrive in the warehouse's stock at purchase order cost.
+ * End to end across purchasing, receiving, inventory, and payables: a purchase order sent to a vendor is received
+ * at the warehouse dock in two deliveries, the goods arrive in the warehouse's stock at purchase order cost, and
+ * what is owed for them is accrued.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -83,6 +84,27 @@ class ProcureToStockFlowTest(
             jsonPath("$.total") { value(2) }
             jsonPath("$.items[0].type") { value("RECEIPT") }
             jsonPath("$.items[1].quantity.amount") { value(48.0) }
+        }
+        accrued(vendorId, orderId)
+    }
+
+    /** Payables accrues each receipt from GoodsReceived: 4 and then 6 cases at 18.00 is 72.00 and 108.00. */
+    private fun accrued(
+        vendorId: String,
+        orderId: String,
+    ) {
+        await().atMost(patience).untilAsserted {
+            mockMvc.get("/api/v1/payables/accruals?vendorId=$vendorId").andExpect {
+                status { isOk() }
+                jsonPath("$.total") { value(2) }
+                jsonPath("$.items[0].purchaseOrderId") { value(orderId) }
+                jsonPath("$.items[0].openAmount.amount") { value(72.0) }
+                jsonPath("$.items[1].amount.amount") { value(108.0) }
+            }
+        }
+        mockMvc.get("/api/v1/payables/accruals/balances").andExpect {
+            jsonPath("$[?(@.vendorId == '$vendorId')].openAmount.amount") { value(180.0) }
+            jsonPath("$[?(@.vendorId == '$vendorId')].stale") { value(false) }
         }
     }
 
