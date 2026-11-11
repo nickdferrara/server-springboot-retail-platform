@@ -1,6 +1,7 @@
 package com.retailplatform.locations.domain
 
 import com.retailplatform.locations.api.events.StoreOpened
+import com.retailplatform.shared.AggregateRoot
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.EventId
 import com.retailplatform.shared.StoreId
@@ -14,13 +15,7 @@ class Store private constructor(
     val name: StoreName,
     val timeZone: ZoneId,
     val openedOn: BusinessDate,
-    events: List<StoreOpened>,
-) {
-    private val pendingEvents = events.toMutableList()
-
-    /** Hands over the events raised since the store was loaded or created, so each is published once. */
-    fun releaseEvents(): List<StoreOpened> = pendingEvents.toList().also { pendingEvents.clear() }
-
+) : AggregateRoot() {
     companion object {
         /** Opens a new store, raising [StoreOpened]. */
         fun open(
@@ -41,7 +36,7 @@ class Store private constructor(
                     storeName = name.value,
                     timeZone = timeZone.id,
                 )
-            return Store(id, number, name, timeZone, openedOn, listOf(opened))
+            return Store(id, number, name, timeZone, openedOn).also { it.raise(opened) }
         }
 
         /** Rebuilds a store from stored state. Raises no events. */
@@ -51,6 +46,6 @@ class Store private constructor(
             name: StoreName,
             timeZone: ZoneId,
             openedOn: BusinessDate,
-        ): Store = Store(id, number, name, timeZone, openedOn, emptyList())
+        ): Store = Store(id, number, name, timeZone, openedOn)
     }
 }

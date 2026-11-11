@@ -1,5 +1,6 @@
 package com.retailplatform.locations.domain
 
+import com.retailplatform.locations.api.events.StoreOpened
 import com.retailplatform.shared.BusinessDate
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldBeEmpty
@@ -23,7 +24,7 @@ class StoreTest {
         val events = store.releaseEvents()
 
         events shouldHaveSize 1
-        with(events.single()) {
+        with(events.single() as StoreOpened) {
             storeId shouldBe store.id
             storeNumber shouldBe "0101"
             storeName shouldBe "Main Street"
