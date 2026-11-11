@@ -4,6 +4,7 @@ import com.retailplatform.locations.application.OpenStoreCommand
 import com.retailplatform.locations.domain.Store
 import com.retailplatform.locations.domain.StoreName
 import com.retailplatform.locations.domain.StoreNumber
+import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.shared.BusinessDate
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
@@ -27,12 +28,14 @@ data class OpenStoreRequest(
 ) {
     /** Turns the validated request into a command made of domain types. */
     fun toCommand(): OpenStoreCommand =
-        OpenStoreCommand(
-            number = StoreNumber.of(requireNotNull(number)),
-            name = StoreName.of(requireNotNull(name)),
-            timeZone = zoneOf(requireNotNull(timeZone)),
-            openedOn = BusinessDate(requireNotNull(openedOn)),
-        )
+        mapRequest {
+            OpenStoreCommand(
+                number = StoreNumber.of(requireNotNull(number)),
+                name = StoreName.of(requireNotNull(name)),
+                timeZone = zoneOf(requireNotNull(timeZone)),
+                openedOn = BusinessDate(requireNotNull(openedOn)),
+            )
+        }
 
     private fun zoneOf(id: String): ZoneId =
         try {

@@ -1,7 +1,10 @@
 package com.retailplatform.platform.error
 
+import com.retailplatform.platform.security.SecurityConfiguration
+import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.shared.BusinessRuleViolation
 import com.retailplatform.shared.ResourceNotFound
+import com.retailplatform.shared.UnitOfMeasure
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
 import org.junit.jupiter.api.Test
@@ -21,7 +24,7 @@ import org.springframework.web.bind.annotation.RequestBody
 import org.springframework.web.bind.annotation.RestController
 
 @WebMvcTest(ProblemDetailsAdviceTest.ProbeController::class)
-@Import(ProblemDetailsAdviceTest.ProbeController::class)
+@Import(ProblemDetailsAdviceTest.ProbeController::class, SecurityConfiguration::class)
 class ProblemDetailsAdviceTest(
     @Autowired private val mockMvc: MockMvc,
 ) {
@@ -55,6 +58,11 @@ class ProblemDetailsAdviceTest(
     @Test
     fun `a value object that refuses its input is a bad request`() {
         expectProblem("invalid-value", 400, "invalid-value")
+    }
+
+    @Test
+    fun `an illegal argument outside request mapping is a bug, not a bad request`() {
+        expectProblem("bug", 500, "internal-error")
     }
 
     @Test
@@ -126,7 +134,8 @@ class ProblemDetailsAdviceTest(
             @PathVariable failure: String,
         ): String =
             when (failure) {
-                "invalid-value" -> throw IllegalArgumentException("Not a unit of measure code: 'x'")
+                "invalid-value" -> mapRequest { UnitOfMeasure.of("x").code }
+                "bug" -> throw IllegalArgumentException("a programming error")
                 "business-rule" -> throw ProbeRuleBroken()
                 "not-found" -> throw ResourceNotFound("Probe", "42")
                 "stale" -> throw OptimisticLockingFailureException("stale")

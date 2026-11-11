@@ -57,6 +57,8 @@ class StoreOpeningFlowTest(
             jsonPath("$.openedOn") { value("2026-12-01") }
         }
 
+        createdBy(storeId) shouldBe "local-developer"
+
         await().atMost(Duration.ofSeconds(10)).untilAsserted {
             assignments.findByStore(storeId)?.zone shouldBe PriceZoneCode.DEFAULT
             incompletePublications() shouldBe 0
@@ -123,6 +125,13 @@ class StoreOpeningFlowTest(
 
         json.readValue(json.writeValueAsString(event), StoreOpened::class.java) shouldBe event
     }
+
+    private fun createdBy(storeId: StoreId): String =
+        jdbc
+            .sql("SELECT created_by FROM locations.store WHERE id = :id")
+            .param("id", storeId.value)
+            .query(String::class.java)
+            .single()
 
     private fun incompletePublications(): Int =
         jdbc

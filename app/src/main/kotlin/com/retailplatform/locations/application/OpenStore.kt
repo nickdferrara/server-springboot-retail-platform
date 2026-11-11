@@ -4,6 +4,8 @@ import com.retailplatform.locations.domain.Store
 import com.retailplatform.locations.domain.StoreName
 import com.retailplatform.locations.domain.StoreNumber
 import com.retailplatform.locations.domain.StoreNumberAlreadyInUse
+import com.retailplatform.platform.security.RequiresRole
+import com.retailplatform.platform.security.Roles
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.StoreId
 import org.springframework.context.ApplicationEventPublisher
@@ -26,6 +28,7 @@ class OpenStore(
     private val events: ApplicationEventPublisher,
     private val clock: Clock,
 ) {
+    @RequiresRole(Roles.MASTER_DATA_EDITOR)
     @Transactional
     fun handle(command: OpenStoreCommand): StoreId {
         if (stores.existsByNumber(command.number)) throw StoreNumberAlreadyInUse(command.number)

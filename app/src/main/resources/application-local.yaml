@@ -21,3 +21,17 @@ management:
 logging:
   level:
     com.retailplatform: DEBUG
+
+retail:
+  security:
+    # The local profile has no sign-in: every request runs as this user with these roles, so nothing needs Azure.
+    local:
+      user: local-developer
+      roles:
+        - MasterData.Editor
+        - Store.Orderer
+        - Buyer
+        - Buyer.Approver
+        - Accounting.Clerk
+        - Accounting.Manager
+        - Pricing.Analyst

@@ -1,5 +1,6 @@
 package com.retailplatform.platform.error
 
+import com.retailplatform.platform.web.InvalidRequestValue
 import com.retailplatform.shared.BusinessRuleViolation
 import com.retailplatform.shared.ResourceNotFound
 import org.slf4j.LoggerFactory
@@ -11,6 +12,8 @@ import org.springframework.http.HttpStatusCode
 import org.springframework.http.ProblemDetail
 import org.springframework.http.ResponseEntity
 import org.springframework.http.converter.HttpMessageNotReadableException
+import org.springframework.security.access.AccessDeniedException
+import org.springframework.security.core.AuthenticationException
 import org.springframework.web.ErrorResponse
 import org.springframework.web.bind.MethodArgumentNotValidException
 import org.springframework.web.bind.annotation.ExceptionHandler
@@ -51,11 +54,9 @@ class ProblemDetailsAdvice : ResponseEntityExceptionHandler() {
     }
 
     /** A value object refused the input while a request was being mapped to a command. */
-    @ExceptionHandler(IllegalArgumentException::class)
-    fun invalidValue(ex: IllegalArgumentException): ResponseEntity<ProblemDetail> {
-        log.warn("Rejected an invalid value", ex)
-        return response(ProblemType.INVALID_VALUE.problem(ex.message ?: "A value in the request is invalid."))
-    }
+    @ExceptionHandler(InvalidRequestValue::class)
+    fun invalidValue(ex: InvalidRequestValue): ResponseEntity<ProblemDetail> =
+        response(ProblemType.INVALID_VALUE.problem(ex.message ?: "A value in the request is invalid."))
 
     @ExceptionHandler(BusinessRuleViolation::class)
     fun businessRuleViolation(ex: BusinessRuleViolation): ResponseEntity<ProblemDetail> {
@@ -79,6 +80,8 @@ class ProblemDetailsAdvice : ResponseEntityExceptionHandler() {
 
     @ExceptionHandler(Exception::class)
     fun unexpected(ex: Exception): ResponseEntity<ProblemDetail> {
+        // Sign-in and permission failures belong to the security filter chain, which answers 401 or 403.
+        if (ex is AuthenticationException || ex is AccessDeniedException) throw ex
         log.error("Unhandled failure", ex)
         return response(ProblemType.INTERNAL_ERROR.problem("An unexpected error occurred."))
     }
