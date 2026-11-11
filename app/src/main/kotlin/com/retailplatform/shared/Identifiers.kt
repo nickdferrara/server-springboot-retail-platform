@@ -1,0 +1,42 @@
+package com.retailplatform.shared
+
+import java.util.UUID
+
+// Identifiers that many modules refer to. An identifier used by a single module is declared in that module.
+
+/** Identifies one published domain event; listeners use it to process each event once. */
+@JvmInline
+value class EventId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<EventId>(::EventId)
+}
+
+@JvmInline
+value class ItemId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<ItemId>(::ItemId)
+}
+
+@JvmInline
+value class StoreId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<StoreId>(::StoreId)
+}
+
+@JvmInline
+value class VendorId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<VendorId>(::VendorId)
+}
