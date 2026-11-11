@@ -69,3 +69,13 @@ value class PurchaseOrderId private constructor(
 
     companion object : TypedIdFactory<PurchaseOrderId>(::PurchaseOrderId)
 }
+
+/** Identifies one entry in the inventory movement ledger. */
+@JvmInline
+value class InventoryMovementId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<InventoryMovementId>(::InventoryMovementId)
+}

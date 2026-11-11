@@ -1,5 +1,6 @@
 package com.retailplatform.locations.application
 
+import com.retailplatform.locations.api.StoreDirectory
 import com.retailplatform.locations.domain.LocationName
 import com.retailplatform.locations.domain.Store
 import com.retailplatform.locations.domain.StoreNumber
@@ -90,13 +91,15 @@ class CloseStore(
     }
 }
 
-/** Queries: stores by identifier and by page. */
+/** Queries: stores by identifier and by page; also answers other modules through [StoreDirectory]. */
 @Service
 @Transactional(readOnly = true)
 class StoreQueries(
     private val stores: StoreRepository,
-) {
+) : StoreDirectory {
     fun find(id: StoreId): Store = stores.findById(id) ?: throw ResourceNotFound("Store", id.toString())
 
     fun list(query: PageQuery): Page<Store> = stores.findPage(query)
+
+    override fun exists(storeId: StoreId): Boolean = stores.findById(storeId) != null
 }

@@ -48,6 +48,7 @@ Master data and base pricing (Phase 1 of the PRD), and the start of procure to p
 | `catalog` | `departments`, `units-of-measure`, `items` | `ItemCreated`, `ItemChanged`, `ItemDiscontinued`, `VendorCostChanged` |
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 | `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
+| `inventory` | `inventory/adjustments`, `inventory/counts`, `inventory/on-hand`, `inventory/movements` | `InventoryAdjusted` |
 
 ```bash
 curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
@@ -57,6 +58,8 @@ curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
 Pricing learns about stores and items from their events, so a new store or item can be priced a moment after it is created.
 
 Purchasing learns what each vendor supplies, and at what cost, from the catalog's `VendorCostChanged` event. A purchase order is drafted, approved, and sent; who may approve it is described in [ADR 1](docs/adr/0001-purchase-order-approval.md).
+
+Inventory is an append-only ledger of movements per item and location, warehouse or store, with on-hand and weighted average cost kept as its running total. Stock is counted in the item's base unit, which inventory learns from `ItemCreated`. Until receiving exists, stock enters through a cycle count that carries a unit cost.
 
 ### Sign-in and roles
 

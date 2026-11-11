@@ -9,4 +9,5 @@ object Roles {
     const val ACCOUNTING_CLERK = "Accounting.Clerk"
     const val ACCOUNTING_MANAGER = "Accounting.Manager"
     const val PRICING_ANALYST = "Pricing.Analyst"
+    const val INVENTORY_CONTROLLER = "Inventory.Controller"
 }
