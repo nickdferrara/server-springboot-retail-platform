@@ -49,3 +49,13 @@ value class WarehouseId private constructor(
 
     companion object : TypedIdFactory<WarehouseId>(::WarehouseId)
 }
+
+/** Identifies a delivery route. */
+@JvmInline
+value class RouteId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<RouteId>(::RouteId)
+}
