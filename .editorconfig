@@ -16,6 +16,10 @@ ktlint_code_style = ktlint_official
 [**/package-info.kt]
 ktlint_standard_filename = disabled
 
+# Inbound adapters live in `adapter.in`, which Kotlin spells with backticks because `in` is a keyword.
+[**/adapter/in/**/*.kt]
+ktlint_standard_package-name = disabled
+
 [*.{yaml,yml,toml,json}]
 indent_size = 2
 
