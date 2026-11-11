@@ -17,7 +17,7 @@ class AssignDefaultPriceZone(
     @Transactional
     fun handle(command: AssignDefaultPriceZoneCommand) {
         if (assignments.findByStore(command.storeId) == null) {
-            assignments.add(StorePriceZone.forNewStore(command.storeId))
+            assignments.save(StorePriceZone.forNewStore(command.storeId))
         }
     }
 }

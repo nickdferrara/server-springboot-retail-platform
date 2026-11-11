@@ -36,14 +36,23 @@ builds the container image.
 
 Each module owns one PostgreSQL schema, named after the module. Its Flyway scripts live in `app/src/main/resources/db/migration/<module>/` and are applied to that schema, which keeps its own migration history. To give a module its first table, add `V1__<description>.sql` to its folder; do not qualify table names with the schema.
 
-### Walking skeleton
+### What the API covers so far
 
-`locations` and `pricing` are the reference for how every module is built. `POST /api/v1/stores` opens a store through the `OpenStore` use case, which saves the `Store` aggregate and publishes `StoreOpened`. A listener in `pricing` receives the event after the transaction commits and puts the store in the default price zone.
+Master data and base pricing (Phase 1 of the PRD). Every module follows the same layout; `locations` is the simplest to read first.
+
+| Module | Endpoints under `/api/v1` | Publishes |
+| --- | --- | --- |
+| `vendors` | `vendors` | `VendorCreated`, `VendorTermsChanged` |
+| `locations` | `stores`, `warehouses`, `routes` | `StoreOpened`, `StoreClosed`, `RouteScheduleChanged` |
+| `catalog` | `departments`, `units-of-measure`, `items` | `ItemCreated`, `ItemChanged`, `ItemDiscontinued`, `VendorCostChanged` |
+| `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 
 ```bash
 curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
   -d '{"number": "0101", "name": "Main Street", "timeZone": "America/Chicago", "openedOn": "2026-12-01"}'
 ```
+
+Pricing learns about stores and items from their events, so a new store or item can be priced a moment after it is created.
 
 ### Sign-in and roles
 
