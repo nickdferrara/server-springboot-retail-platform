@@ -10,6 +10,7 @@ version = "0.1.0-SNAPSHOT"
 dependencies {
     implementation(libs.spring.boot.starter.webmvc)
     implementation(libs.spring.boot.starter.actuator)
+    implementation(libs.spring.boot.starter.validation)
     implementation(libs.spring.boot.starter.data.jdbc)
     implementation(libs.spring.boot.starter.flyway)
     implementation(libs.spring.modulith.starter.core)
@@ -19,6 +20,8 @@ dependencies {
     developmentOnly(libs.spring.boot.docker.compose)
 
     testImplementation(libs.spring.boot.starter.test)
+    testImplementation(libs.spring.boot.starter.webmvc.test)
+    testImplementation(libs.spring.boot.starter.data.jdbc.test)
     testImplementation(libs.spring.modulith.starter.test)
     testImplementation(libs.spring.boot.testcontainers)
     testImplementation(libs.testcontainers.junit.jupiter)
