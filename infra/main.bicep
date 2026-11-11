@@ -86,16 +86,6 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
     name: databaseName
   }
 
-  // The application's identity administers the database so Flyway can create schemas and tables.
-  resource administrator 'administrators' = {
-    name: identity.properties.principalId
-    properties: {
-      principalType: 'ServicePrincipal'
-      principalName: identity.name
-      tenantId: subscription().tenantId
-    }
-  }
-
   // Without a virtual network, the Container App reaches the database over Azure's network.
   resource allowAzureServices 'firewallRules' = {
     name: 'AllowAllAzureServices'
@@ -103,6 +93,16 @@ resource database 'Microsoft.DBforPostgreSQL/flexibleServers@2024-08-01' = {
       startIpAddress: '0.0.0.0'
       endIpAddress: '0.0.0.0'
     }
+  }
+}
+
+// The application's identity administers the database so Flyway can create schemas and tables.
+module databaseAdministrator 'database-administrator.bicep' = {
+  name: 'database-administrator'
+  params: {
+    serverName: database.name
+    principalId: identity.properties.principalId
+    principalName: identity.name
   }
 }
 
@@ -129,6 +129,10 @@ resource app 'Microsoft.App/containerApps@2024-03-01' = {
       '${identity.id}': {}
     }
   }
+  // The application signs in to the database at startup, so its identity must already be the administrator.
+  dependsOn: [
+    databaseAdministrator
+  ]
   properties: {
     managedEnvironmentId: environment.id
     configuration: {

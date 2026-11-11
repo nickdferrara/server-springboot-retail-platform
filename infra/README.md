@@ -1,6 +1,6 @@
 # Infrastructure
 
-`main.bicep` describes one environment: a Container App that scales to zero, its managed identity, a Log Analytics
+`main.bicep` (with its module `database-administrator.bicep`) describes one environment: a Container App that scales to zero, its managed identity, a Log Analytics
 workspace with a daily cap, and an Azure Database for PostgreSQL Flexible Server. `dev.bicepparam` holds the dev
 settings.
 
