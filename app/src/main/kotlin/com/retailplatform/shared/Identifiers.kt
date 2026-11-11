@@ -59,3 +59,13 @@ value class RouteId private constructor(
 
     companion object : TypedIdFactory<RouteId>(::RouteId)
 }
+
+/** Identifies a purchase order to a vendor. */
+@JvmInline
+value class PurchaseOrderId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<PurchaseOrderId>(::PurchaseOrderId)
+}
