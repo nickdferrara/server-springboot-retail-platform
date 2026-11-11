@@ -58,6 +58,7 @@ The `local` profile has no sign-in: every request runs as `local-developer` with
 - `gradle/libs.versions.toml`: the version catalog, the one place to change versions.
 - `config/detekt/`: Detekt rule overrides.
 - `docker/`: the Dockerfile and the Docker Compose file for local development.
+- `infra/`: Bicep templates for Azure; see `infra/README.md`. Nothing is deployed yet.
 
 ## Technology
 
