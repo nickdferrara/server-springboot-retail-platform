@@ -28,5 +28,7 @@ COPY --from=build /workspace/extracted/application/ ./
 
 USER 10001:10001
 EXPOSE 8080
+# A container never falls back to the local profile, which has no sign-in.
+ENV SPRING_PROFILES_ACTIVE=prod
 ENV JAVA_TOOL_OPTIONS="-XX:MaxRAMPercentage=75"
 ENTRYPOINT ["java", "-jar", "retail-platform.jar"]

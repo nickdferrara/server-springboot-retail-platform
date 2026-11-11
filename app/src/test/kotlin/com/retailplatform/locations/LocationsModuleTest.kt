@@ -8,6 +8,7 @@ import com.retailplatform.locations.application.OpenStoreCommand
 import com.retailplatform.locations.domain.StoreName
 import com.retailplatform.locations.domain.StoreNumber
 import com.retailplatform.locations.domain.StoreNumberAlreadyInUse
+import com.retailplatform.platform.security.Roles
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.StoreId
@@ -18,10 +19,12 @@ import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Import
 import org.springframework.modulith.test.ApplicationModuleTest
 import org.springframework.modulith.test.Scenario
+import org.springframework.security.test.context.support.WithMockUser
 import java.time.Clock
 import java.time.ZoneId
 
 @ApplicationModuleTest
+@WithMockUser(authorities = [Roles.MASTER_DATA_EDITOR])
 @Import(TestcontainersConfiguration::class)
 class LocationsModuleTest(
     @Autowired private val openStore: OpenStore,

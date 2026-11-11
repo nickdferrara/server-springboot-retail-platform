@@ -2,6 +2,7 @@ package com.retailplatform.locations.adapter.`in`.web
 
 import com.retailplatform.locations.application.FindStore
 import com.retailplatform.locations.application.OpenStore
+import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.shared.StoreId
 import jakarta.validation.Valid
 import org.springframework.http.ResponseEntity
@@ -32,5 +33,5 @@ class StoreController(
     @GetMapping("/{id}")
     fun get(
         @PathVariable id: String,
-    ): StoreResponse = StoreResponse.from(findStore.handle(StoreId.parse(id)))
+    ): StoreResponse = StoreResponse.from(findStore.handle(mapRequest { StoreId.parse(id) }))
 }

@@ -45,6 +45,12 @@ curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
   -d '{"number": "0101", "name": "Main Street", "timeZone": "America/Chicago", "openedOn": "2026-12-01"}'
 ```
 
+### Sign-in and roles
+
+Outside the `local` profile every request except the health probes needs a Microsoft Entra ID access token (`ENTRA_TENANT_ID`, `ENTRA_API_AUDIENCE`). The token's `roles` claim carries the application roles in `Roles`, and a use case states the role it needs with `@RequiresRole`.
+
+The `local` profile has no sign-in: every request runs as `local-developer` with the roles listed in `application-local.yaml`. The container image defaults to the `prod` profile so it can never start without sign-in by accident.
+
 ## Repository layout
 
 - `app/`: the single application module. Each business module is a package under `com.retailplatform` declared in its `package-info.kt`.

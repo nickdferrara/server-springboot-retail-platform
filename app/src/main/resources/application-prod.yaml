@@ -16,3 +16,10 @@ spring:
   datasource:
     url: ${DATABASE_URL}
     username: ${DATABASE_USERNAME}
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          # Microsoft Entra ID: tokens must come from this tenant and be issued for this API.
+          issuer-uri: https://login.microsoftonline.com/${ENTRA_TENANT_ID}/v2.0
+          audiences: ${ENTRA_API_AUDIENCE}

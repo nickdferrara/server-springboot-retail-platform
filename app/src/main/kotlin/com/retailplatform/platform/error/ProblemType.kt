@@ -17,6 +17,8 @@ enum class ProblemType(
     VALIDATION_FAILED(HttpStatus.BAD_REQUEST, "validation-failed", "Validation failed"),
     MALFORMED_REQUEST(HttpStatus.BAD_REQUEST, "malformed-request", "Malformed request"),
     INVALID_VALUE(HttpStatus.BAD_REQUEST, "invalid-value", "Invalid value"),
+    UNAUTHENTICATED(HttpStatus.UNAUTHORIZED, "unauthenticated", "Unauthenticated"),
+    FORBIDDEN(HttpStatus.FORBIDDEN, "forbidden", "Forbidden"),
     NOT_FOUND(HttpStatus.NOT_FOUND, "not-found", "Not found"),
     CONFLICT(HttpStatus.CONFLICT, "conflict", "Conflict"),
     BUSINESS_RULE_VIOLATION(HttpStatus.UNPROCESSABLE_CONTENT, "business-rule-violation", "Business rule violation"),
