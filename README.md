@@ -22,7 +22,19 @@ runs compilation, Detekt, ktlint, the tests (including Spring Modulith module ve
 ./gradlew :app:bootRun
 ```
 
-starts the application with the `local` profile on port 8080. The `local` profile needs no Azure access. Health is at `/actuator/health`.
+starts the application with the `local` profile on port 8080. It needs Docker: Spring Boot starts the services in `docker/docker-compose.yml` (PostgreSQL 17 and Azurite) and stops them on exit. The `local` profile needs no Azure access. Health is at `/actuator/health`.
+
+Tests that start the application use Testcontainers, so they also need Docker.
+
+```bash
+docker build -f docker/Dockerfile -t retail-platform .
+```
+
+builds the container image.
+
+### Database migrations
+
+Each module owns one PostgreSQL schema, named after the module. Its Flyway scripts live in `app/src/main/resources/db/migration/<module>/` and are applied to that schema, which keeps its own migration history. To give a module its first table, add `V1__<description>.sql` to its folder; do not qualify table names with the schema.
 
 ## Repository layout
 
@@ -30,6 +42,7 @@ starts the application with the `local` profile on port 8080. The `local` profil
 - `build-logic/`: Gradle convention plugins (`retail.kotlin-conventions`, `retail.spring-conventions`, `retail.quality-conventions`, `retail.test-conventions`).
 - `gradle/libs.versions.toml`: the version catalog, the one place to change versions.
 - `config/detekt/`: Detekt rule overrides.
+- `docker/`: the Dockerfile and the Docker Compose file for local development.
 
 ## Technology
 
