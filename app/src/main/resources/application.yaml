@@ -37,3 +37,6 @@ retail:
   company:
     # The time zone in which business dates, cutoffs, and fiscal periods are resolved.
     time-zone: ${COMPANY_TIME_ZONE:UTC}
+  payables:
+    # An open goods-received-not-invoiced accrual older than this many days is flagged as stale.
+    stale-accrual-days: 60

@@ -49,6 +49,7 @@ Master data and base pricing (Phase 1 of the PRD), and the start of procure to p
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 | `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
 | `receiving` | `expected-deliveries`, `receipts` | `GoodsReceived`, `ReceiptDiscrepancyRecorded` |
+| `payables` | `payables/accruals`, `payables/accruals/balances` | `AccrualRecorded` |
 | `inventory` | `inventory/adjustments`, `inventory/counts`, `inventory/on-hand`, `inventory/movements` | `InventoryAdjusted` |
 
 ```bash
@@ -63,6 +64,8 @@ Purchasing learns what each vendor supplies, and at what cost, from the catalog'
 Inventory is an append-only ledger of movements per item and location, warehouse or store, with on-hand and weighted average cost kept as its running total. Stock is counted in the item's base unit, which inventory learns from `ItemCreated`. Goods received at a warehouse dock enter stock at purchase order cost and move the average.
 
 Receiving expects every purchase order that purchasing sends. A clerk checks a delivery in against the order's lines; cases over, short, and damaged are recorded on the receipt and published as a discrepancy.
+
+Payables accrues what is owed for each receipt at purchase order cost (goods received, not invoiced) from `GoodsReceived`, and reports the open balance and its age by vendor. The matching journal entry arrives with the ledger.
 
 ### Sign-in and roles
 
