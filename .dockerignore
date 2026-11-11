@@ -1,0 +1,9 @@
+.git
+.github
+.gradle
+.kotlin
+.idea
+**/build
+docs
+infra
+*.md

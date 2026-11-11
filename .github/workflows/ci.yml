@@ -52,3 +52,17 @@ jobs:
             app/build/test-results/
           if-no-files-found: ignore
           retention-days: 14
+
+  image:
+    name: image
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@v7
+
+      - name: Build container image
+        run: docker build -f docker/Dockerfile -t retail-platform:ci .
+
+      - name: Image runs as a non-root user
+        run: test "$(docker inspect --format '{{.Config.User}}' retail-platform:ci)" = "10001:10001"
