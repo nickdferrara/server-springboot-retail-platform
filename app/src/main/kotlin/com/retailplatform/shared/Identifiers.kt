@@ -40,3 +40,12 @@ value class VendorId private constructor(
 
     companion object : TypedIdFactory<VendorId>(::VendorId)
 }
+
+@JvmInline
+value class WarehouseId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<WarehouseId>(::WarehouseId)
+}
