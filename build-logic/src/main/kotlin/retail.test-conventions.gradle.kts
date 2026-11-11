@@ -23,10 +23,15 @@ tasks.withType<Test>().configureEach {
 
 kover {
     reports {
-        // The coverage gate applies to business logic: the domain and application layers of every module.
+        // The coverage gate applies to business logic: the shared kernel and the domain and application layers
+        // of every module.
         filters {
             includes {
-                classes("com.retailplatform.*.domain.*", "com.retailplatform.*.application.*")
+                classes(
+                    "com.retailplatform.shared.*",
+                    "com.retailplatform.*.domain.*",
+                    "com.retailplatform.*.application.*",
+                )
             }
         }
         verify {
