@@ -1,5 +1,6 @@
 package com.retailplatform.locations.application
 
+import com.retailplatform.locations.api.WarehouseDirectory
 import com.retailplatform.locations.domain.LocationName
 import com.retailplatform.locations.domain.Warehouse
 import com.retailplatform.locations.domain.WarehouseNumber
@@ -61,13 +62,15 @@ class UpdateWarehouseDetails(
     }
 }
 
-/** Queries: warehouses by identifier and by page. */
+/** Queries: warehouses by identifier and by page; also answers other modules through [WarehouseDirectory]. */
 @Service
 @Transactional(readOnly = true)
 class WarehouseQueries(
     private val warehouses: WarehouseRepository,
-) {
+) : WarehouseDirectory {
     fun find(id: WarehouseId): Warehouse = warehouses.findById(id) ?: throw ResourceNotFound("Warehouse", id.toString())
 
     fun list(query: PageQuery): Page<Warehouse> = warehouses.findPage(query)
+
+    override fun exists(warehouseId: WarehouseId): Boolean = warehouses.existsById(warehouseId)
 }

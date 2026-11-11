@@ -62,6 +62,8 @@ class JdbcWarehouseRepository(
 
     override fun findById(id: WarehouseId): Warehouse? = warehouses.findById(id.value).getOrNull()?.toDomain()
 
+    override fun existsById(id: WarehouseId): Boolean = warehouses.existsById(id.value)
+
     override fun existsByNumber(number: WarehouseNumber): Boolean = warehouses.existsByNumber(number.value)
 
     override fun findPage(query: PageQuery): Page<Warehouse> {

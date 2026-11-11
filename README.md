@@ -7,6 +7,7 @@ A modular monolith for running a multi-store retail and convenience business: st
 ## Documentation
 
 - [Product requirements](docs/prd.md): scope, architecture, module design, event catalog, accounting, and delivery phases.
+- [Architecture decision records](docs/adr): decisions that shaped the code, one file each.
 
 ## Getting started
 
@@ -38,7 +39,7 @@ Each module owns one PostgreSQL schema, named after the module. Its Flyway scrip
 
 ### What the API covers so far
 
-Master data and base pricing (Phase 1 of the PRD). Every module follows the same layout; `locations` is the simplest to read first.
+Master data and base pricing (Phase 1 of the PRD), and the start of procure to pay (Phase 2). Every module follows the same layout; `locations` is the simplest to read first.
 
 | Module | Endpoints under `/api/v1` | Publishes |
 | --- | --- | --- |
@@ -46,6 +47,7 @@ Master data and base pricing (Phase 1 of the PRD). Every module follows the same
 | `locations` | `stores`, `warehouses`, `routes` | `StoreOpened`, `StoreClosed`, `RouteScheduleChanged` |
 | `catalog` | `departments`, `units-of-measure`, `items` | `ItemCreated`, `ItemChanged`, `ItemDiscontinued`, `VendorCostChanged` |
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
+| `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
 
 ```bash
 curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
@@ -53,6 +55,8 @@ curl -X POST localhost:8080/api/v1/stores -H 'Content-Type: application/json' \
 ```
 
 Pricing learns about stores and items from their events, so a new store or item can be priced a moment after it is created.
+
+Purchasing learns what each vendor supplies, and at what cost, from the catalog's `VendorCostChanged` event. A purchase order is drafted, approved, and sent; who may approve it is described in [ADR 1](docs/adr/0001-purchase-order-approval.md).
 
 ### Sign-in and roles
 

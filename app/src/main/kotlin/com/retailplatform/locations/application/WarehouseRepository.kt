@@ -13,6 +13,8 @@ interface WarehouseRepository {
 
     fun findById(id: WarehouseId): Warehouse?
 
+    fun existsById(id: WarehouseId): Boolean
+
     fun existsByNumber(number: WarehouseNumber): Boolean
 
     /** Warehouses ordered by number. */
