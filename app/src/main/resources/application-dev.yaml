@@ -1,5 +1,8 @@
 # Azure dev environment. Environment-specific settings and secrets are supplied by the platform, never by this file.
 logging:
+  structured:
+    format:
+      console: ecs
   level:
     com.retailplatform: INFO
 

@@ -32,3 +32,8 @@ management:
     health:
       probes:
         enabled: true
+
+retail:
+  company:
+    # The time zone in which business dates, cutoffs, and fiscal periods are resolved.
+    time-zone: ${COMPANY_TIME_ZONE:UTC}

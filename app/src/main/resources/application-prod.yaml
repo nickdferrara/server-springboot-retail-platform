@@ -5,6 +5,9 @@ management:
       show-details: never
 
 logging:
+  structured:
+    format:
+      console: ecs
   level:
     root: WARN
     com.retailplatform: INFO
