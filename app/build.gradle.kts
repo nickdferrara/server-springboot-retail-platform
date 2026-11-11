@@ -16,6 +16,7 @@ dependencies {
     implementation(libs.spring.modulith.starter.core)
     implementation(libs.spring.modulith.starter.jdbc)
     implementation(libs.flyway.database.postgresql)
+    implementation(libs.jackson.module.kotlin)
     runtimeOnly(libs.postgresql)
     developmentOnly(libs.spring.boot.docker.compose)
 

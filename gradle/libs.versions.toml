@@ -19,6 +19,7 @@ spring-modulith-bom = { module = "org.springframework.modulith:spring-modulith-b
 
 # Application (versions managed by the platforms above)
 kotlin-reflect = { module = "org.jetbrains.kotlin:kotlin-reflect" }
+jackson-module-kotlin = { module = "tools.jackson.module:jackson-module-kotlin" }
 spring-boot-starter-webmvc = { module = "org.springframework.boot:spring-boot-starter-webmvc" }
 spring-boot-starter-validation = { module = "org.springframework.boot:spring-boot-starter-validation" }
 spring-boot-starter-actuator = { module = "org.springframework.boot:spring-boot-starter-actuator" }
