@@ -9,6 +9,7 @@ import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.Page
 import com.retailplatform.shared.PageQuery
+import com.retailplatform.shared.PurchaseOrderId
 import com.retailplatform.shared.ReceiptId
 import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.VendorId
@@ -18,6 +19,7 @@ import org.springframework.context.ApplicationEventPublisher
 import org.springframework.context.annotation.Configuration
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.math.BigDecimal
 import java.time.Clock
 
 /** Port: where accruals are kept, one per receipt. */
@@ -34,6 +36,9 @@ interface AccrualRepository {
         vendorId: VendorId,
         query: PageQuery,
     ): Page<Accrual>
+
+    /** A purchase order's open accruals, the oldest receipt first. */
+    fun findOpenByPurchaseOrder(purchaseOrderId: PurchaseOrderId): List<Accrual>
 
     /** Open accruals totalled by vendor and currency, with the day of each vendor's oldest open receipt. */
     fun openBalances(): List<OpenBalance>
@@ -52,7 +57,16 @@ data class OpenBalance(
 data class PayablesProperties(
     /** An open accrual older than this many days is flagged as stale. */
     val staleAccrualDays: Long = 60,
-)
+    val match: MatchProperties = MatchProperties(),
+) {
+    /** How far an invoice line's cost may differ from the purchase order's and still match. */
+    data class MatchProperties(
+        /** The most a case cost may differ from the purchase order's, as a percentage of it. */
+        val priceTolerancePercent: BigDecimal = BigDecimal("2.00"),
+        /** The most a line's total may differ from purchase order cost, in the invoice's currency. */
+        val priceToleranceAmount: BigDecimal = BigDecimal("10.00"),
+    )
+}
 
 /** Makes [PayablesProperties] available to the module's use cases. */
 @Configuration(proxyBeanMethods = false)

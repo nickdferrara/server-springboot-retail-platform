@@ -4,6 +4,7 @@ import com.retailplatform.ledger.domain.EntrySide
 import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
+import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.Money
@@ -57,6 +58,39 @@ class GoodsReceivedPostingRule : PostingRule<GoodsReceived> {
                     PostingLine(PostingAccount.WAREHOUSE_INVENTORY, EntrySide.DEBIT, cost),
                     PostingLine(PostingAccount.ACCRUED_PAYABLES, EntrySide.CREDIT, cost),
                 ),
+        )
+    }
+}
+
+/**
+ * Vendor invoice matched: debit accrued payables for what was accrued, credit accounts payable for what the
+ * vendor billed, and put the difference to purchase price variance.
+ */
+@Component
+class InvoiceMatchedPostingRule : PostingRule<InvoiceMatched> {
+    override fun posting(event: InvoiceMatched): Posting? {
+        val currency = Currency.getInstance(event.currency)
+        val billed = Money.of(event.invoiceAmount, currency)
+        val accrued = Money.of(event.accruedAmount, currency)
+        val variance = billed - accrued
+        val lines =
+            listOf(
+                PostingLine(PostingAccount.ACCRUED_PAYABLES, EntrySide.DEBIT, accrued),
+                PostingLine(
+                    PostingAccount.PURCHASE_PRICE_VARIANCE,
+                    if (variance.isNegative) EntrySide.CREDIT else EntrySide.DEBIT,
+                    if (variance.isNegative) -variance else variance,
+                ),
+                PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, billed),
+            ).filterNot { it.amount.isZero }
+        if (lines.isEmpty()) return null
+
+        return Posting(
+            journal = Journal.PURCHASES,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Invoice ${event.invoice.vendorInvoiceNumber}"),
+            description = "Vendor invoice ${event.invoice.vendorInvoiceNumber} matched",
+            lines = lines,
         )
     }
 }
