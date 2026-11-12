@@ -2,17 +2,31 @@ package com.retailplatform.payables
 
 import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.payables.api.events.AccrualRecorded
+import com.retailplatform.payables.api.events.InvoiceMatchException
+import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.application.AccrualQueries
+import com.retailplatform.payables.application.EnterVendorInvoice
+import com.retailplatform.payables.application.InvoiceQueries
 import com.retailplatform.payables.application.RecordAccrual
 import com.retailplatform.payables.application.RecordAccrualCommand
+import com.retailplatform.payables.application.RematchVendorInvoice
 import com.retailplatform.payables.domain.AccrualLine
 import com.retailplatform.payables.domain.AccruedReceipt
+import com.retailplatform.payables.domain.InvoiceAlreadyEntered
+import com.retailplatform.payables.domain.InvoiceAlreadyMatched
+import com.retailplatform.payables.domain.InvoiceDetails
+import com.retailplatform.payables.domain.InvoiceLine
+import com.retailplatform.payables.domain.InvoiceStatus
+import com.retailplatform.payables.domain.MatchExceptionReason
+import com.retailplatform.payables.domain.VendorInvoiceNumber
+import com.retailplatform.platform.security.Roles
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.receiving.api.events.GoodsReceivedLine
 import com.retailplatform.receiving.api.events.ReceiptFacts
 import com.retailplatform.shared.AccrualId
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.EventId
+import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.PageQuery
@@ -22,20 +36,29 @@ import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.VendorId
 import com.retailplatform.shared.WarehouseId
 import io.kotest.assertions.throwables.shouldThrow
+import io.kotest.matchers.collections.shouldContain
+import io.kotest.matchers.collections.shouldNotContain
 import io.kotest.matchers.shouldBe
+import io.kotest.matchers.types.shouldBeInstanceOf
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.context.annotation.Import
 import org.springframework.modulith.test.ApplicationModuleTest
 import org.springframework.modulith.test.Scenario
+import org.springframework.security.access.AccessDeniedException
+import org.springframework.security.test.context.support.WithMockUser
 import java.math.BigDecimal
 import java.time.Clock
 
 @ApplicationModuleTest
 @Import(TestcontainersConfiguration::class)
+@WithMockUser(username = "clerk", authorities = [Roles.ACCOUNTING_CLERK])
 class PayablesModuleTest(
     @Autowired private val recordAccrual: RecordAccrual,
     @Autowired private val accruals: AccrualQueries,
+    @Autowired private val enterVendorInvoice: EnterVendorInvoice,
+    @Autowired private val rematchVendorInvoice: RematchVendorInvoice,
+    @Autowired private val invoices: InvoiceQueries,
     @Autowired private val clock: Clock,
 ) {
     private val today get() = BusinessDate.today(clock)
@@ -98,6 +121,120 @@ class PayablesModuleTest(
         accruals.balances().indexOfFirst { it.vendorId == overdue } shouldBe 0
         accruals.open(recent, PageQuery.of()).items.map { it.receipt.receivedOn } shouldBe
             listOf(today.minusDays(10), today.minusDays(2))
+    }
+
+    @Test
+    fun `an invoice that agrees with its receipts matches, relieves the accrual, and is announced`(scenario: Scenario) {
+        val vendorId = VendorId.generate(clock)
+        val orderId = PurchaseOrderId.generate(clock)
+        receive(vendorId, orderId, cases = 10, caseCost = "18.00")
+        var invoiceId: InvoiceId? = null
+
+        scenario
+            .stimulate(
+                Runnable { invoiceId = enterVendorInvoice.handle(details(vendorId, orderId, "INV-1", 6, "18.25")) },
+            ).andWaitForEventOfType(InvoiceMatched::class.java)
+            .matching { it.invoice.purchaseOrderId == orderId }
+            .toArriveAndVerify { event ->
+                event.invoiceAmount shouldBe BigDecimal("109.5000")
+                event.accruedAmount shouldBe BigDecimal("108.0000")
+                event.priceVariance shouldBe BigDecimal("1.5000")
+            }
+
+        val invoice = invoices.find(requireNotNull(invoiceId))
+        invoice.status shouldBe InvoiceStatus.Matched(today)
+        invoice.enteredBy shouldBe "clerk"
+        accruals
+            .open(vendorId, PageQuery.of())
+            .items
+            .single()
+            .openAmount shouldBe usd("72.00")
+        accruals.balances().first { it.vendorId == vendorId }.openAmount shouldBe usd("72.00")
+        shouldThrow<InvoiceAlreadyEntered> {
+            enterVendorInvoice.handle(
+                details(vendorId, orderId, "INV-1", 1, "18.00"),
+            )
+        }
+        shouldThrow<InvoiceAlreadyMatched> { rematchVendorInvoice.handle(invoice.id) }
+    }
+
+    @Test
+    fun `an invoice ahead of its goods waits as an exception and matches once they arrive`(scenario: Scenario) {
+        val vendorId = VendorId.generate(clock)
+        val orderId = PurchaseOrderId.generate(clock)
+        var invoiceId: InvoiceId? = null
+
+        scenario
+            .stimulate(
+                Runnable { invoiceId = enterVendorInvoice.handle(details(vendorId, orderId, "INV-2", 4, "18.00")) },
+            ).andWaitForEventOfType(InvoiceMatchException::class.java)
+            .matching { it.invoice.purchaseOrderId == orderId }
+            .toArriveAndVerify { event -> event.exceptions.single().reason shouldBe "NOTHING_RECEIVED" }
+
+        val id = requireNotNull(invoiceId)
+        invoices
+            .find(id)
+            .status
+            .shouldBeInstanceOf<InvoiceStatus.Exception>()
+            .exceptions
+            .single()
+            .reason shouldBe
+            MatchExceptionReason.NOTHING_RECEIVED
+        invoices.list(exceptionsOnly = true, PageQuery.of()).items.map { it.id } shouldContain id
+
+        receive(vendorId, orderId, cases = 4, caseCost = "18.00")
+        rematchVendorInvoice.handle(id)
+
+        invoices.find(id).status shouldBe InvoiceStatus.Matched(today)
+        invoices.list(exceptionsOnly = true, PageQuery.of()).items.map { it.id } shouldNotContain id
+        invoices.list(exceptionsOnly = false, PageQuery.of()).items.map { it.id } shouldContain id
+        accruals.open(vendorId, PageQuery.of()).total shouldBe 0
+        shouldThrow<ResourceNotFound> { invoices.find(InvoiceId.generate(clock)) }
+    }
+
+    @Test
+    @WithMockUser(authorities = [Roles.BUYER])
+    fun `only accounting enters and matches invoices`() {
+        val details = details(VendorId.generate(clock), PurchaseOrderId.generate(clock), "INV-3", 1, "1.00")
+
+        shouldThrow<AccessDeniedException> { enterVendorInvoice.handle(details) }
+        shouldThrow<AccessDeniedException> { rematchVendorInvoice.handle(InvoiceId.generate(clock)) }
+    }
+
+    private fun details(
+        vendorId: VendorId,
+        orderId: PurchaseOrderId,
+        number: String,
+        cases: Int,
+        caseCost: String,
+    ) = InvoiceDetails(
+        vendorId,
+        VendorInvoiceNumber.of(number),
+        today,
+        orderId,
+        listOf(InvoiceLine.of(1, cases, usd(caseCost))),
+    )
+
+    private fun receive(
+        vendorId: VendorId,
+        orderId: PurchaseOrderId,
+        cases: Int,
+        caseCost: String,
+    ) {
+        recordAccrual.handle(
+            RecordAccrualCommand(
+                AccruedReceipt(
+                    ReceiptId.generate(clock),
+                    "300003",
+                    orderId,
+                    "200003",
+                    vendorId,
+                    WarehouseId.generate(clock),
+                    today,
+                ),
+                listOf(AccrualLine.of(1, ItemId.generate(clock), cases, usd(caseCost))),
+            ),
+        )
     }
 
     private fun accrue(

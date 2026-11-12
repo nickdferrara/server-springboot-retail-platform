@@ -55,6 +55,7 @@ data class AccrualLineEntity(
     val itemId: UUID,
     val casesReceived: Int,
     val caseCost: BigDecimal,
+    val casesInvoiced: Int,
 )
 
 interface AccrualJdbcRepository : CrudRepository<AccrualEntity, UUID> {
@@ -72,6 +73,12 @@ interface AccrualJdbcRepository : CrudRepository<AccrualEntity, UUID> {
 
     @Query("SELECT count(*) FROM payables.accrual WHERE vendor_id = :vendorId AND open_amount > 0")
     fun countOpen(vendorId: UUID): Long
+
+    @Query(
+        "SELECT * FROM payables.accrual WHERE purchase_order_id = :purchaseOrderId AND open_amount > 0 " +
+            "ORDER BY received_on, id",
+    )
+    fun findOpenByPurchaseOrder(purchaseOrderId: UUID): List<AccrualEntity>
 }
 
 @Repository
@@ -103,6 +110,7 @@ class JdbcAccrualRepository(
                             it.itemId.value,
                             it.casesReceived,
                             it.caseCost.amount,
+                            it.casesInvoiced,
                         )
                     },
                 version = accrual.version,
@@ -125,6 +133,9 @@ class JdbcAccrualRepository(
             query.size,
             accruals.countOpen(vendorId.value),
         )
+
+    override fun findOpenByPurchaseOrder(purchaseOrderId: PurchaseOrderId): List<Accrual> =
+        accruals.findOpenByPurchaseOrder(purchaseOrderId.value).map { it.toDomain() }
 
     override fun openBalances(): List<OpenBalance> =
         jdbc
@@ -167,9 +178,9 @@ class JdbcAccrualRepository(
                         ItemId.of(it.itemId),
                         it.casesReceived,
                         Money.of(it.caseCost, money),
+                        it.casesInvoiced,
                     )
                 },
-            openAmount = Money.of(openAmount, money),
             version = version,
         )
     }

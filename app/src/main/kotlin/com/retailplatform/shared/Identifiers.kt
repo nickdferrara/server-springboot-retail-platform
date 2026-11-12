@@ -109,3 +109,13 @@ value class JournalEntryId private constructor(
 
     companion object : TypedIdFactory<JournalEntryId>(::JournalEntryId)
 }
+
+/** Identifies a vendor invoice. */
+@JvmInline
+value class InvoiceId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<InvoiceId>(::InvoiceId)
+}

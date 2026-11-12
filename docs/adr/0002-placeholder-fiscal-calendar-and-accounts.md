@@ -22,9 +22,10 @@ rule and no journal entry code.
   on the Sunday on or before 1 January, and in a year of 53 weeks the extra week joins period 12. Periods are
   stored in `ledger.fiscal_period`; a year is generated the first time a date in it is needed. Business date to
   period is a lookup.
-- **Accounts.** Two accounts are seeded: `01-1400-0000-00` Warehouse inventory and `01-2100-0000-00` Accrued
-  payables. Location and department segments are zero. An account is one row keyed by its full string; segment
-  values are not yet master data.
+- **Accounts.** Four accounts are seeded: `01-1400-0000-00` Warehouse inventory, `01-2100-0000-00` Accrued
+  payables, `01-2000-0000-00` Accounts payable, and `01-5100-0000-00` Purchase price variance. Location and
+  department segments are zero. An account is one row keyed by its full string; segment values are not yet
+  master data.
 - **Account determination.** A posting rule names a `PostingAccount` role, and `ledger.posting_account` says
   which account fills it. One account fills a role for the whole company.
 

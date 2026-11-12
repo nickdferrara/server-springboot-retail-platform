@@ -19,7 +19,8 @@ import java.time.LocalDate
 /**
  * End to end across purchasing, receiving, inventory, payables, and the ledger: a purchase order sent to a vendor
  * is received at the warehouse dock in two deliveries, the goods arrive in the warehouse's stock at purchase
- * order cost, what is owed for them is accrued, and each receipt posts a balanced journal entry.
+ * order cost, what is owed for them is accrued, each receipt posts a balanced journal entry, and the vendor's
+ * invoice matches and moves the accrual to accounts payable.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -87,6 +88,7 @@ class ProcureToStockFlowTest(
         }
         accrued(vendorId, orderId)
         journalized()
+        invoiced(vendorId, orderId)
     }
 
     /** Payables accrues each receipt from GoodsReceived: 4 and then 6 cases at 18.00 is 72.00 and 108.00. */
@@ -126,6 +128,38 @@ class ProcureToStockFlowTest(
             jsonPath("$.balanced") { value(true) }
             jsonPath("$.accounts[?(@.accountNumber == '01-1400-0000-00')].accountName") { value("Warehouse inventory") }
         }
+    }
+
+    /**
+     * The vendor bills all ten cases at 18.30 against an order cost of 18.00. That is within tolerance, so the
+     * invoice matches, the accruals are relieved, and the ledger moves 180.00 to accounts payable with 3.00 of
+     * purchase price variance.
+     */
+    private fun invoiced(
+        vendorId: String,
+        orderId: String,
+    ) {
+        post(
+            "/api/v1/payables/invoices",
+            """
+            {"vendorId": "$vendorId", "vendorInvoiceNumber": "INV-${System.nanoTime()}", "invoiceDate": "$today",
+             "purchaseOrderId": "$orderId",
+             "lines": [{"purchaseOrderLineNumber": 1, "cases": 10, "caseCost": {"amount": 18.30, "currency": "USD"}}]}
+            """.trimIndent(),
+        ).andExpect {
+            status { isCreated() }
+            jsonPath("$.status") { value("MATCHED") }
+            jsonPath("$.amount.amount") { value(183.0) }
+        }
+        mockMvc.get("/api/v1/payables/accruals?vendorId=$vendorId").andExpect { jsonPath("$.total") { value(0) } }
+        await().atMost(patience).untilAsserted {
+            mockMvc.get("/api/v1/ledger/journal-entries?size=200").andExpect {
+                jsonPath("$.items[?(@.amount.amount == 183.0 && @.journal == 'PURCHASES')].lines[1].accountNumber") {
+                    value("01-5100-0000-00")
+                }
+            }
+        }
+        mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect { jsonPath("$.balanced") { value(true) } }
     }
 
     private fun sendOrder(

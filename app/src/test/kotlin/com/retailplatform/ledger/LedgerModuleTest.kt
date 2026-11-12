@@ -4,6 +4,7 @@ import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
+import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
 import com.retailplatform.ledger.application.PostJournalEntry
 import com.retailplatform.ledger.application.Posting
@@ -18,12 +19,15 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.JournalEntryUnbalanced
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
+import com.retailplatform.payables.api.events.InvoiceFacts
+import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.platform.security.Roles
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.receiving.api.events.GoodsReceivedLine
 import com.retailplatform.receiving.api.events.ReceiptFacts
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.EventId
+import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.JournalEntryId
 import com.retailplatform.shared.Money
@@ -119,8 +123,80 @@ class LedgerModuleTest(
         after.getValue(inventory) - before.getOrDefault(inventory, usd("0")) shouldBe usd("192.00")
         after.getValue(accrued) - before.getOrDefault(accrued, usd("0")) shouldBe usd("-192.00")
         ledger.trialBalance(today).isBalanced shouldBe true
-        ledger.trialBalance(today.minusDays(1)).accounts.sumOf { it.debits.amount } shouldBe
-            before.values.filter { it.isPositive }.sumOf { it.amount }
+        // Every entry in this test database is dated today, so yesterday's trial balance is empty.
+        ledger.trialBalance(today.minusDays(1)).accounts shouldBe emptyList()
+    }
+
+    @Test
+    fun `a matched invoice moves the accrual to accounts payable with the price variance`(scenario: Scenario) {
+        val before = balances()
+        val event =
+            InvoiceMatched(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                invoice =
+                    InvoiceFacts(
+                        InvoiceId.generate(clock),
+                        "INV-77",
+                        VendorId.generate(clock),
+                        PurchaseOrderId.generate(clock),
+                    ),
+                invoiceAmount = BigDecimal("183.0000"),
+                accruedAmount = BigDecimal("180.0000"),
+                priceVariance = BigDecimal("3.0000"),
+                currency = "USD",
+            )
+
+        scenario
+            .publish(event)
+            .andWaitForEventOfType(JournalEntryPosted::class.java)
+            .matching { it.sourceEventId == event.eventId }
+            .toArriveAndVerify { journalEntry ->
+                journalEntry.journal shouldBe "PURCHASES"
+                journalEntry.amount shouldBe BigDecimal("183.0000")
+            }
+
+        val after = balances()
+        val payable = AccountNumber.of("01-2000-0000-00")
+        val variance = AccountNumber.of("01-5100-0000-00")
+        after.getValue(accrued) - before.getOrDefault(accrued, usd("0")) shouldBe usd("180.00")
+        after.getValue(payable) - before.getOrDefault(payable, usd("0")) shouldBe usd("-183.00")
+        after.getValue(variance) - before.getOrDefault(variance, usd("0")) shouldBe usd("3.00")
+        ledger.trialBalance(today).isBalanced shouldBe true
+    }
+
+    @Test
+    fun `an invoice billed under order cost credits the variance, and one at cost has none`() {
+        val rule = InvoiceMatchedPostingRule()
+        val invoice =
+            InvoiceFacts(InvoiceId.generate(clock), "INV-78", VendorId.generate(clock), PurchaseOrderId.generate(clock))
+
+        fun posting(
+            billed: String,
+            accruedAt: String,
+        ) = rule.posting(
+            InvoiceMatched(
+                EventId.generate(clock),
+                clock.instant(),
+                today,
+                invoice,
+                BigDecimal(billed),
+                BigDecimal(accruedAt),
+                BigDecimal(billed) - BigDecimal(accruedAt),
+                "USD",
+            ),
+        )
+
+        posting("178.00", "180.00")?.lines?.map { it.role to it.side } shouldBe
+            listOf(
+                PostingAccount.ACCRUED_PAYABLES to EntrySide.DEBIT,
+                PostingAccount.PURCHASE_PRICE_VARIANCE to EntrySide.CREDIT,
+                PostingAccount.ACCOUNTS_PAYABLE to EntrySide.CREDIT,
+            )
+        posting("180.00", "180.00")?.lines?.map { it.role } shouldBe
+            listOf(PostingAccount.ACCRUED_PAYABLES, PostingAccount.ACCOUNTS_PAYABLE)
+        posting("0.00", "0.00") shouldBe null
     }
 
     @Test

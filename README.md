@@ -49,7 +49,7 @@ Master data and base pricing (Phase 1 of the PRD), and the start of procure to p
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 | `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
 | `receiving` | `expected-deliveries`, `receipts` | `GoodsReceived`, `ReceiptDiscrepancyRecorded` |
-| `payables` | `payables/accruals`, `payables/accruals/balances` | `AccrualRecorded` |
+| `payables` | `payables/accruals`, `payables/accruals/balances`, `payables/invoices` | `AccrualRecorded`, `InvoiceMatched`, `InvoiceMatchException` |
 | `ledger` | `ledger/accounts`, `ledger/posting-accounts`, `ledger/fiscal-periods`, `ledger/journal-entries`, `ledger/trial-balance` | `JournalEntryPosted` |
 | `inventory` | `inventory/adjustments`, `inventory/counts`, `inventory/on-hand`, `inventory/movements` | `InventoryAdjusted` |
 
@@ -68,7 +68,9 @@ Receiving expects every purchase order that purchasing sends. A clerk checks a d
 
 Payables accrues what is owed for each receipt at purchase order cost (goods received, not invoiced) from `GoodsReceived`, and reports the open balance and its age by vendor.
 
-The ledger turns business events into balanced, append-only journal entries through posting rules, one per event type. Goods received debit warehouse inventory and credit accrued payables. A rule names the role an account plays, and which account fills the role is data. The fiscal calendar and the two seeded accounts are placeholders; see [ADR 2](docs/adr/0002-placeholder-fiscal-calendar-and-accounts.md).
+A vendor invoice is entered against a purchase order and matched three ways at once: the cases it bills must have been received and not yet invoiced, and its case cost must be within tolerance of the purchase order's (`retail.payables.match`). A match relieves the accruals, oldest receipt first; anything else waits as an exception and can be matched again.
+
+The ledger turns business events into balanced, append-only journal entries through posting rules, one per event type. Goods received debit warehouse inventory and credit accrued payables; a matched invoice debits accrued payables, credits accounts payable, and puts the difference to purchase price variance. A rule names the role an account plays, and which account fills the role is data. The fiscal calendar and the two seeded accounts are placeholders; see [ADR 2](docs/adr/0002-placeholder-fiscal-calendar-and-accounts.md).
 
 ### Sign-in and roles
 

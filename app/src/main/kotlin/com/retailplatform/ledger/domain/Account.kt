@@ -66,6 +66,12 @@ enum class PostingAccount {
 
     /** Owed to vendors for goods received and not yet invoiced. */
     ACCRUED_PAYABLES,
+
+    /** Owed to vendors on matched invoices. */
+    ACCOUNTS_PAYABLE,
+
+    /** The difference between what a vendor billed and the purchase order cost that was accrued. */
+    PURCHASE_PRICE_VARIANCE,
 }
 
 class AccountNumberAlreadyInUse(
