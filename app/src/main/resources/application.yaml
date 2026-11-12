@@ -19,9 +19,22 @@ spring:
         schema: platform
         schema-initialization:
           enabled: false
+      # A publication that stays in one of these states for longer, counted from its last delivery attempt, is
+      # stale: the registry marks it failed, and the retry schedule hands it back to its listener. See ADR 3.
+      staleness:
+        published: 5m
+        processing: 10m
+        resubmitted: 10m
+        check-interval: 1m
 
 server:
   shutdown: graceful
+
+logging:
+  level:
+    # The registry logs three lines a minute while it finds nothing stale. Overdue publications are reported by
+    # EventPublicationMonitor instead.
+    org.springframework.modulith.events.core.DefaultEventPublicationRegistry: WARN
 
 management:
   endpoints:
@@ -37,6 +50,21 @@ retail:
   company:
     # The time zone in which business dates, cutoffs, and fiscal periods are resolved.
     time-zone: ${COMPANY_TIME_ZONE:UTC}
+  events:
+    retry:
+      # How often failed publications are retried, and how old a publication must be before it is.
+      interval: 1m
+      min-age: 1m
+      batch-size: 100
+    monitor:
+      # How often the registry is checked, and how long a publication may be incomplete before it is reported.
+      interval: 1m
+      overdue-after: 15m
+    archive:
+      # Completed publications move to the archive table this long after they completed, in a nightly run.
+      cron: "0 30 2 * * *"
+      completed-after: 30d
+      batch-size: 1000
   payables:
     # An open goods-received-not-invoiced accrual older than this many days is flagged as stale.
     stale-accrual-days: 60

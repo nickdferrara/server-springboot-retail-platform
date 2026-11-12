@@ -72,6 +72,10 @@ A vendor invoice is entered against a purchase order and matched three ways at o
 
 The ledger turns business events into balanced, append-only journal entries through posting rules, one per event type. Goods received debit warehouse inventory and credit accrued payables; a matched invoice debits accrued payables, credits accounts payable, and puts the difference to purchase price variance. A rule names the role an account plays, and which account fills the role is data. The fiscal calendar and the two seeded accounts are placeholders; see [ADR 2](docs/adr/0002-placeholder-fiscal-calendar-and-accounts.md).
 
+### Event delivery
+
+A listener that fails does not lose its event. Failed publications are retried every minute until the listener completes; a publication left behind by a stopped instance is found stale, marked failed, and retried the same way. Publications incomplete for more than 15 minutes are logged as an error with their listeners, and counted in the `retail.events.publications.*` gauges. Completed publications move to `platform.event_publication_archive` after 30 days. Settings are under `retail.events` and `spring.modulith.events.staleness`; see [ADR 3](docs/adr/0003-event-publication-retry-and-archive.md).
+
 ### Sign-in and roles
 
 Outside the `local` profile every request except the health probes needs a Microsoft Entra ID access token (`ENTRA_TENANT_ID`, `ENTRA_API_AUDIENCE`). The token's `roles` claim carries the application roles in `Roles`, and a use case states the role it needs with `@RequiresRole`.
