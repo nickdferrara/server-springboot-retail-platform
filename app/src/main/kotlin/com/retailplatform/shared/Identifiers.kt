@@ -99,3 +99,13 @@ value class AccrualId private constructor(
 
     companion object : TypedIdFactory<AccrualId>(::AccrualId)
 }
+
+/** Identifies a journal entry in the general ledger. */
+@JvmInline
+value class JournalEntryId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<JournalEntryId>(::JournalEntryId)
+}
