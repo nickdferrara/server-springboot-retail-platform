@@ -18,6 +18,16 @@ interface StockedItemRepository {
 
 /** Port: where on-hand quantities and average costs are kept, one per item and location. */
 interface StockLevelRepository {
+    /**
+     * Makes this transaction the only one changing the stock of [itemId] at [location] until it ends; another
+     * transaction asking for the same lock waits. Taken before the stock level is read, so two changes arriving
+     * together are applied one after the other, including the first change, when there is no row to lock yet.
+     */
+    fun lock(
+        itemId: ItemId,
+        location: StockLocation,
+    )
+
     /** Inserts a new stock level or updates an existing one; a stale version is refused. */
     fun save(level: StockLevel)
 

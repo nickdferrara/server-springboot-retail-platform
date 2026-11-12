@@ -34,8 +34,9 @@ class ReceiveStock(
 ) {
     @Transactional
     fun handle(command: ReceiveStockCommand) {
-        command.lines.forEach { line ->
-            val level = stockLevels.at(line.itemId, command.location)
+        // Items are taken in a fixed order, so two receipts sharing items never wait on each other in a circle.
+        command.lines.sortedBy { it.itemId.value }.forEach { line ->
+            val level = stockLevels.forChange(line.itemId, command.location)
             val quantity = Quantity.of(line.baseUnits, level.onHand.unit)
             val movement = level.receive(quantity, line.unitCost, command.businessDate, command.source, clock)
             posting.post(level, movement)
