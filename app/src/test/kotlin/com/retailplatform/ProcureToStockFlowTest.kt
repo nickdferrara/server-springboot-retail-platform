@@ -17,9 +17,9 @@ import java.time.Duration
 import java.time.LocalDate
 
 /**
- * End to end across purchasing, receiving, inventory, and payables: a purchase order sent to a vendor is received
- * at the warehouse dock in two deliveries, the goods arrive in the warehouse's stock at purchase order cost, and
- * what is owed for them is accrued.
+ * End to end across purchasing, receiving, inventory, payables, and the ledger: a purchase order sent to a vendor
+ * is received at the warehouse dock in two deliveries, the goods arrive in the warehouse's stock at purchase
+ * order cost, what is owed for them is accrued, and each receipt posts a balanced journal entry.
  */
 @SpringBootTest
 @AutoConfigureMockMvc
@@ -86,6 +86,7 @@ class ProcureToStockFlowTest(
             jsonPath("$.items[1].quantity.amount") { value(48.0) }
         }
         accrued(vendorId, orderId)
+        journalized()
     }
 
     /** Payables accrues each receipt from GoodsReceived: 4 and then 6 cases at 18.00 is 72.00 and 108.00. */
@@ -105,6 +106,25 @@ class ProcureToStockFlowTest(
         mockMvc.get("/api/v1/payables/accruals/balances").andExpect {
             jsonPath("$[?(@.vendorId == '$vendorId')].openAmount.amount") { value(180.0) }
             jsonPath("$[?(@.vendorId == '$vendorId')].stale") { value(false) }
+        }
+    }
+
+    /** The ledger posts each receipt from GoodsReceived: debit warehouse inventory, credit accrued payables. */
+    private fun journalized() {
+        await().atMost(patience).untilAsserted {
+            mockMvc.get("/api/v1/ledger/journal-entries?size=200").andExpect {
+                status { isOk() }
+                jsonPath("$.items[?(@.amount.amount == 108.0 && @.journal == 'INVENTORY')].lines[0].side") {
+                    value("DEBIT")
+                }
+                jsonPath("$.items[?(@.amount.amount == 72.0 && @.journal == 'INVENTORY')].lines[1].accountNumber") {
+                    value("01-2100-0000-00")
+                }
+            }
+        }
+        mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect {
+            jsonPath("$.balanced") { value(true) }
+            jsonPath("$.accounts[?(@.accountNumber == '01-1400-0000-00')].accountName") { value("Warehouse inventory") }
         }
     }
 
