@@ -23,6 +23,7 @@ class ModuleMigrationTest(
     @Test
     fun `the event publication registry lives in the platform schema`() {
         tablesIn("platform") shouldContain "event_publication"
+        tablesIn("platform") shouldContain "event_publication_archive"
     }
 
     private fun tablesIn(schema: String): List<String> =
