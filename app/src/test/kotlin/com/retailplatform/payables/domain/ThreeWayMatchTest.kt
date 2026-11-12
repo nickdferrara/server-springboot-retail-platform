@@ -125,6 +125,51 @@ class ThreeWayMatchTest {
     }
 
     @Test
+    fun `an override accepts a price over tolerance and puts the whole difference to variance`() {
+        val accrual = accrual(AccrualLine.of(1, chips, 10, usd("18.00")))
+        val invoice = invoice(InvoiceLine.of(1, 10, usd("20.00")))
+        invoice.record(match.match(invoice, listOf(accrual)), clock)
+        invoice.releaseEvents()
+        val override = MatchOverride.of("manager", "Cost increase agreed with the buyer")
+
+        val outcome = match.match(invoice, listOf(accrual), acceptPrice = true)
+        invoice.record(outcome, clock, override)
+
+        outcome shouldBe MatchOutcome.Matched(usd("180.00"))
+        accrual.isOpen shouldBe false
+        invoice.status shouldBe InvoiceStatus.Matched(today, override)
+        val event = invoice.releaseEvents().single().shouldBeInstanceOf<InvoiceMatched>()
+        event.invoiceAmount shouldBe BigDecimal("200.0000")
+        event.priceVariance shouldBe BigDecimal("20.0000")
+    }
+
+    @Test
+    fun `an override is not given by whoever entered the invoice, nor for cases not received or another currency`() {
+        val accrual = accrual(AccrualLine.of(1, chips, 10, usd("18.00")))
+        val overpriced = invoice(InvoiceLine.of(1, 10, usd("20.00")))
+        val accepted = match.match(overpriced, listOf(accrual), acceptPrice = true)
+
+        shouldThrow<OverrideByInvoiceCreator> {
+            overpriced.record(accepted, clock, MatchOverride.of("clerk", "I entered it myself"))
+        }
+
+        val untouched = accrual(AccrualLine.of(1, chips, 10, usd("18.00")))
+        match
+            .match(invoice(InvoiceLine.of(1, 11, usd("20.00"))), listOf(untouched), acceptPrice = true)
+            .shouldBeInstanceOf<MatchOutcome.Exceptions>()
+            .exceptions
+            .single()
+            .reason shouldBe MatchExceptionReason.QUANTITY_OVER_RECEIPT
+        match
+            .match(invoice(InvoiceLine.of(1, 10, Money.of("18.00", "CAD"))), listOf(untouched), acceptPrice = true)
+            .shouldBeInstanceOf<MatchOutcome.Exceptions>()
+            .exceptions
+            .single()
+            .reason shouldBe MatchExceptionReason.PRICE_OVER_TOLERANCE
+        untouched.openAmount shouldBe usd("180.00")
+    }
+
+    @Test
     fun `an invoice bills each order line once, in one currency, with cases and a cost`() {
         shouldThrow<InvoiceLineRepeated> {
             invoice(

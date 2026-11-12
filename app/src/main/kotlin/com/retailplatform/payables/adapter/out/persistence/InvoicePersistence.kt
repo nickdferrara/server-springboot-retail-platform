@@ -6,6 +6,7 @@ import com.retailplatform.payables.domain.InvoiceLine
 import com.retailplatform.payables.domain.InvoiceStatus
 import com.retailplatform.payables.domain.MatchException
 import com.retailplatform.payables.domain.MatchExceptionReason
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.VendorInvoice
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.platform.persistence.AuditMetadata
@@ -43,6 +44,8 @@ data class VendorInvoiceEntity(
     val enteredBy: String,
     val status: String,
     val matchedOn: LocalDate?,
+    val overrideApprovedBy: String?,
+    val overrideReason: String?,
     @MappedCollection(idColumn = "vendor_invoice_id", keyColumn = "position") val lines: List<InvoiceLineEntity>,
     @MappedCollection(idColumn = "vendor_invoice_id", keyColumn = "position")
     val exceptions: List<InvoiceExceptionEntity>,
@@ -88,6 +91,7 @@ class JdbcVendorInvoiceRepository(
         val audit =
             if (invoice.version == 0) AuditMetadata() else invoices.findById(invoice.id.value).orElseThrow().audit
         val status = invoice.status
+        val override = (status as? InvoiceStatus.Matched)?.override
         invoices.save(
             VendorInvoiceEntity(
                 id = invoice.id.value,
@@ -98,6 +102,8 @@ class JdbcVendorInvoiceRepository(
                 enteredBy = invoice.enteredBy,
                 status = status.code,
                 matchedOn = (status as? InvoiceStatus.Matched)?.matchedOn?.value,
+                overrideApprovedBy = override?.approvedBy,
+                overrideReason = override?.reason,
                 lines =
                     invoice.lines.map {
                         InvoiceLineEntity(
@@ -154,7 +160,7 @@ class JdbcVendorInvoiceRepository(
                 ),
             enteredBy = enteredBy,
             status =
-                matchedOn?.let { InvoiceStatus.Matched(BusinessDate(it)) }
+                matchedOn?.let { InvoiceStatus.Matched(BusinessDate(it), override()) }
                     ?: InvoiceStatus.Exception(
                         exceptions.map {
                             MatchException(
@@ -166,6 +172,13 @@ class JdbcVendorInvoiceRepository(
                     ),
             version = version,
         )
+
+    private fun VendorInvoiceEntity.override(): MatchOverride? =
+        if (overrideApprovedBy != null && overrideReason != null) {
+            MatchOverride.of(overrideApprovedBy, overrideReason)
+        } else {
+            null
+        }
 
     private companion object {
         const val EXCEPTION = "EXCEPTION"
