@@ -6,6 +6,7 @@ import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
 import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
+import com.retailplatform.ledger.application.PaymentIssuedPostingRule
 import com.retailplatform.ledger.application.PostJournalEntry
 import com.retailplatform.ledger.application.Posting
 import com.retailplatform.ledger.application.PostingLine
@@ -21,6 +22,7 @@ import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
 import com.retailplatform.payables.api.events.InvoiceFacts
 import com.retailplatform.payables.api.events.InvoiceMatched
+import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.platform.security.Roles
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.receiving.api.events.GoodsReceivedLine
@@ -32,6 +34,7 @@ import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.JournalEntryId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.PageQuery
+import com.retailplatform.shared.PaymentId
 import com.retailplatform.shared.PurchaseOrderId
 import com.retailplatform.shared.ReceiptId
 import com.retailplatform.shared.ResourceNotFound
@@ -165,6 +168,54 @@ class LedgerModuleTest(
         after.getValue(variance) - before.getOrDefault(variance, usd("0")) shouldBe usd("3.00")
         ledger.trialBalance(today).isBalanced shouldBe true
     }
+
+    @Test
+    fun `a vendor payment clears accounts payable against the bank and the discount taken`(scenario: Scenario) {
+        val before = balances()
+        val event = paymentIssued(gross = "300.0000", discount = "4.0000", net = "296.0000")
+
+        scenario
+            .publish(event)
+            .andWaitForEventOfType(JournalEntryPosted::class.java)
+            .matching { it.sourceEventId == event.eventId }
+            .toArriveAndVerify { journalEntry ->
+                journalEntry.journal shouldBe "CASH_DISBURSEMENTS"
+                journalEntry.amount shouldBe BigDecimal("300.0000")
+            }
+
+        val after = balances()
+        val payable = AccountNumber.of("01-2000-0000-00")
+        val bank = AccountNumber.of("01-1000-0000-00")
+        val discounts = AccountNumber.of("01-5200-0000-00")
+        after.getValue(payable) - before.getOrDefault(payable, usd("0")) shouldBe usd("300.00")
+        after.getValue(bank) - before.getOrDefault(bank, usd("0")) shouldBe usd("-296.00")
+        after.getValue(discounts) - before.getOrDefault(discounts, usd("0")) shouldBe usd("-4.00")
+        ledger.trialBalance(today).isBalanced shouldBe true
+
+        // A payment with no discount has no discount line.
+        val plain = PaymentIssuedPostingRule().posting(paymentIssued("50.0000", "0.0000", "50.0000"))
+        requireNotNull(plain).lines.map { it.role } shouldBe
+            listOf(PostingAccount.ACCOUNTS_PAYABLE, PostingAccount.BANK)
+        PaymentIssuedPostingRule().posting(paymentIssued("0.0000", "0.0000", "0.0000")) shouldBe null
+    }
+
+    private fun paymentIssued(
+        gross: String,
+        discount: String,
+        net: String,
+    ) = PaymentIssued(
+        eventId = EventId.generate(clock),
+        occurredAt = clock.instant(),
+        businessDate = today,
+        paymentId = PaymentId.generate(clock),
+        paymentNumber = "100042",
+        vendorId = VendorId.generate(clock),
+        grossAmount = BigDecimal(gross),
+        discountAmount = BigDecimal(discount),
+        netAmount = BigDecimal(net),
+        currency = "USD",
+        vouchers = emptyList(),
+    )
 
     @Test
     fun `an invoice billed under order cost credits the variance, and one at cost has none`() {

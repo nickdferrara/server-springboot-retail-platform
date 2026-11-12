@@ -119,3 +119,23 @@ value class InvoiceId private constructor(
 
     companion object : TypedIdFactory<InvoiceId>(::InvoiceId)
 }
+
+/** Identifies a payable voucher: an approved amount owed to a vendor on one invoice. */
+@JvmInline
+value class VoucherId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<VoucherId>(::VoucherId)
+}
+
+/** Identifies a payment to a vendor. */
+@JvmInline
+value class PaymentId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<PaymentId>(::PaymentId)
+}

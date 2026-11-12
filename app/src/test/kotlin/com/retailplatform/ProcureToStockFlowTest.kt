@@ -88,7 +88,64 @@ class ProcureToStockFlowTest(
         }
         accrued(vendorId, orderId)
         journalized()
-        invoiced(vendorId, orderId)
+        val invoice = invoiced(vendorId, orderId)
+        vouchered(vendorId, invoice)
+    }
+
+    /**
+     * The matched invoice releases a voucher for 183.00, which a payment run picks up. With sign-in off every
+     * request is the same user, so the run cannot be approved here: the person who proposed it may not approve
+     * it. Approval and the payment's journal entry are covered by the payables and ledger module tests.
+     */
+    private fun vouchered(
+        vendorId: String,
+        invoice: String,
+    ) {
+        mockMvc.get("/api/v1/payables/vouchers?vendorId=$vendorId&status=RELEASED").andExpect {
+            status { isOk() }
+            jsonPath("$.total") { value(1) }
+            jsonPath("$.items[0].amount.amount") { value(183.0) }
+            jsonPath("$.items[0].invoiceId") { value(invoice.substringAfterLast('/')) }
+        }
+        mockMvc.get("/api/v1/payables/vouchers?status=LOST").andExpect { status { isBadRequest() } }
+        post("$invoice/override", """{"reason": "Already matched"}""").andExpect {
+            status { isUnprocessableContent() }
+            jsonPath("$.code") { value("payables.invoice-already-matched") }
+        }
+        post(
+            "/api/v1/payables/payment-runs",
+            """{"paymentDate": "$today", "payThrough": "${today.minusDays(1)}"}""",
+        ).andExpect { status { isBadRequest() } }
+
+        val run =
+            created(
+                post(
+                    "/api/v1/payables/payment-runs",
+                    """{"paymentDate": "$today", "payThrough": "${today.plusDays(400)}"}""",
+                ),
+            )
+        mockMvc.get(run).andExpect {
+            status { isOk() }
+            jsonPath("$.status") { value("PROPOSED") }
+            jsonPath("$.lines[?(@.vendorId == '$vendorId')].amount.amount") { value(183.0) }
+            jsonPath("$.payments.length()") { value(0) }
+        }
+        mockMvc.get("/api/v1/payables/vouchers?vendorId=$vendorId").andExpect {
+            jsonPath("$.items[0].status") { value("SCHEDULED") }
+        }
+        post("$run/approve", "").andExpect {
+            status { isUnprocessableContent() }
+            jsonPath("$.code") { value("payables.payment-run-approved-by-proposer") }
+        }
+        post("$run/cancel", "").andExpect {
+            status { isOk() }
+            jsonPath("$.status") { value("CANCELLED") }
+            jsonPath("$.decidedBy") { value("local-developer") }
+        }
+        mockMvc.get("/api/v1/payables/payment-runs").andExpect { jsonPath("$.items[0].status") { value("CANCELLED") } }
+        mockMvc.get("/api/v1/payables/vouchers?vendorId=$vendorId").andExpect {
+            jsonPath("$.items[0].status") { value("RELEASED") }
+        }
     }
 
     /** Payables accrues each receipt from GoodsReceived: 4 and then 6 cases at 18.00 is 72.00 and 108.00. */
@@ -138,20 +195,22 @@ class ProcureToStockFlowTest(
     private fun invoiced(
         vendorId: String,
         orderId: String,
-    ) {
-        post(
-            "/api/v1/payables/invoices",
-            """
-            {"vendorId": "$vendorId", "vendorInvoiceNumber": "INV-${System.nanoTime()}", "invoiceDate": "$today",
-             "purchaseOrderId": "$orderId",
-             "lines": [{"purchaseOrderLineNumber": 1, "cases": 10, "caseCost": {"amount": 18.30, "currency": "USD"}}]}
-            """.trimIndent(),
-        ).andExpect {
-            status { isCreated() }
-            jsonPath("$.status") { value("MATCHED") }
-            jsonPath("$.amount.amount") { value(183.0) }
-        }
+    ): String {
+        val invoice =
+            post(
+                "/api/v1/payables/invoices",
+                """
+                {"vendorId": "$vendorId", "vendorInvoiceNumber": "INV-${System.nanoTime()}", "invoiceDate": "$today",
+                 "purchaseOrderId": "$orderId",
+                 "lines": [{"purchaseOrderLineNumber": 1, "cases": 10, "caseCost": {"amount": 18.30, "currency": "USD"}}]}
+                """.trimIndent(),
+            ).andExpect {
+                status { isCreated() }
+                jsonPath("$.status") { value("MATCHED") }
+                jsonPath("$.amount.amount") { value(183.0) }
+            }
         mockMvc.get("/api/v1/payables/accruals?vendorId=$vendorId").andExpect { jsonPath("$.total") { value(0) } }
+        val location = created(invoice)
         await().atMost(patience).untilAsserted {
             mockMvc.get("/api/v1/ledger/journal-entries?size=200").andExpect {
                 jsonPath("$.items[?(@.amount.amount == 183.0 && @.journal == 'PURCHASES')].lines[1].accountNumber") {
@@ -160,6 +219,7 @@ class ProcureToStockFlowTest(
             }
         }
         mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect { jsonPath("$.balanced") { value(true) } }
+        return location
     }
 
     private fun sendOrder(

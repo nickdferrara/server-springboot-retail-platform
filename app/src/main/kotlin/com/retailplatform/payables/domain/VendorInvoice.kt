@@ -89,14 +89,40 @@ data class MatchException(
     val detail: String,
 )
 
+/** Someone other than the person who entered an invoice accepted its price exception, for [reason]. */
+@ConsistentCopyVisibility
+data class MatchOverride private constructor(
+    val approvedBy: String,
+    val reason: String,
+) {
+    companion object {
+        const val MAX_REASON_LENGTH = 200
+
+        /** @throws IllegalArgumentException if [reason] is blank or longer than [MAX_REASON_LENGTH] once trimmed. */
+        fun of(
+            approvedBy: String,
+            reason: String,
+        ): MatchOverride {
+            val trimmed = reason.trim()
+            require(trimmed.isNotEmpty()) { "An override needs a reason" }
+            require(trimmed.length <= MAX_REASON_LENGTH) { "A reason has at most $MAX_REASON_LENGTH characters" }
+            return MatchOverride(approvedBy, trimmed)
+        }
+    }
+}
+
 /** Whether an invoice agreed with its purchase order and receipts when it was last matched. */
 sealed interface InvoiceStatus {
     /** A short name for the status, stored and shown to users. */
     val code: String
 
-    /** Agreed on [matchedOn]; the amount is owed to the vendor. */
+    /**
+     * Agreed on [matchedOn]; the amount is owed to the vendor. [override] is set when a price exception was
+     * accepted rather than resolved.
+     */
     data class Matched(
         val matchedOn: BusinessDate,
+        val override: MatchOverride? = null,
     ) : InvoiceStatus {
         override val code = "MATCHED"
     }
@@ -126,19 +152,22 @@ class VendorInvoice private constructor(
     val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
 
     /**
-     * Records the [outcome] of a three-way match, raising [InvoiceMatched] or [InvoiceMatchException].
+     * Records the [outcome] of a three-way match, raising [InvoiceMatched] or [InvoiceMatchException]. [override]
+     * is given when the match accepted a price exception.
      *
      * @throws InvoiceAlreadyMatched if the invoice has matched before.
+     * @throws OverrideByInvoiceCreator if [override] was approved by the person who entered the invoice.
      */
     fun record(
         outcome: MatchOutcome,
         clock: Clock,
+        override: MatchOverride? = null,
     ) {
-        if (status is InvoiceStatus.Matched) throw InvoiceAlreadyMatched(details.number)
+        requireMatchable(override)
         val today = BusinessDate.today(clock)
         when (outcome) {
             is MatchOutcome.Matched -> {
-                status = InvoiceStatus.Matched(today)
+                status = InvoiceStatus.Matched(today, override)
                 raise(
                     InvoiceMatched(
                         eventId = EventId.generate(clock),
@@ -172,6 +201,18 @@ class VendorInvoice private constructor(
                 )
             }
         }
+    }
+
+    /**
+     * Checks that the invoice can still be matched, and that [override], if given, comes from someone else than
+     * the person who entered it.
+     *
+     * @throws InvoiceAlreadyMatched if the invoice has matched before.
+     * @throws OverrideByInvoiceCreator if [override] was approved by the person who entered the invoice.
+     */
+    fun requireMatchable(override: MatchOverride? = null) {
+        if (status is InvoiceStatus.Matched) throw InvoiceAlreadyMatched(details.number)
+        if (override?.approvedBy == enteredBy) throw OverrideByInvoiceCreator(details.number)
     }
 
     private fun facts() = InvoiceFacts(id, details.number.value, details.vendorId, details.purchaseOrderId)
@@ -240,4 +281,18 @@ class InvoiceInMixedCurrencies :
     BusinessRuleViolation(
         "payables.invoice-in-mixed-currencies",
         "Every line of an invoice must be in the same currency",
+    )
+
+class OverrideByInvoiceCreator(
+    number: VendorInvoiceNumber,
+) : BusinessRuleViolation(
+        "payables.override-by-invoice-creator",
+        "Invoice $number cannot be overridden by the person who entered it",
+    )
+
+class OverrideDoesNotResolve(
+    number: VendorInvoiceNumber,
+) : BusinessRuleViolation(
+        "payables.override-does-not-resolve",
+        "Invoice $number bills cases that have not been received; only a price exception can be overridden",
     )

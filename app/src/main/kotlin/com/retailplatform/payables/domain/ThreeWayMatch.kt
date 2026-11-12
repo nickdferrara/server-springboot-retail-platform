@@ -76,12 +76,16 @@ class ThreeWayMatch(
     /**
      * Compares [invoice] with the open [accruals] of its purchase order, oldest receipt first. If every line
      * agrees, the matched cases are relieved from the accruals, oldest first; otherwise nothing changes.
+     *
+     * With [acceptPrice] a case cost outside tolerance is accepted, as an approved override does. Cases that were
+     * not received, and a cost in another currency than the purchase order's, are never accepted.
      */
     fun match(
         invoice: VendorInvoice,
         accruals: List<Accrual>,
+        acceptPrice: Boolean = false,
     ): MatchOutcome {
-        val exceptions = invoice.lines.mapNotNull { exceptionFor(it, accruals) }
+        val exceptions = invoice.lines.mapNotNull { exceptionFor(it, accruals, acceptPrice) }
         if (exceptions.isNotEmpty()) return MatchOutcome.Exceptions(exceptions)
 
         val before = accruals.map { it.openAmount }.reduce(Money::plus)
@@ -96,6 +100,7 @@ class ThreeWayMatch(
     private fun exceptionFor(
         line: InvoiceLine,
         accruals: List<Accrual>,
+        acceptPrice: Boolean,
     ): MatchException? {
         val number = line.purchaseOrderLineNumber
         val received = accruals.flatMap { it.lines }.filter { it.purchaseOrderLineNumber == number }
@@ -114,7 +119,8 @@ class ThreeWayMatch(
                 )
             }
 
-            ordered.currency != line.caseCost.currency || !tolerance.allows(ordered, line.caseCost, line.cases) -> {
+            ordered.currency != line.caseCost.currency ||
+                (!acceptPrice && !tolerance.allows(ordered, line.caseCost, line.cases)) -> {
                 MatchException(
                     number,
                     MatchExceptionReason.PRICE_OVER_TOLERANCE,

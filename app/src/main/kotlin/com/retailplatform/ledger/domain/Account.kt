@@ -72,6 +72,12 @@ enum class PostingAccount {
 
     /** The difference between what a vendor billed and the purchase order cost that was accrued. */
     PURCHASE_PRICE_VARIANCE,
+
+    /** The bank account vendor payments are drawn on. */
+    BANK,
+
+    /** Early-payment discounts taken on vendor payments. */
+    PURCHASE_DISCOUNTS_TAKEN,
 }
 
 class AccountNumberAlreadyInUse(

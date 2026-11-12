@@ -2,10 +2,12 @@ package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.EnterVendorInvoice
 import com.retailplatform.payables.application.InvoiceQueries
+import com.retailplatform.payables.application.OverrideMatchException
 import com.retailplatform.payables.application.RematchVendorInvoice
 import com.retailplatform.payables.domain.InvoiceDetails
 import com.retailplatform.payables.domain.InvoiceLine
 import com.retailplatform.payables.domain.InvoiceStatus
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.VendorInvoice
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.platform.web.MoneyDto
@@ -73,6 +75,11 @@ data class EnterVendorInvoiceRequest(
         }
 }
 
+data class OverrideMatchExceptionRequest(
+    @field:NotBlank @field:Size(max = MatchOverride.MAX_REASON_LENGTH)
+    val reason: String?,
+)
+
 data class InvoiceLineResponse(
     val purchaseOrderLineNumber: Int,
     val cases: Int,
@@ -95,6 +102,8 @@ data class VendorInvoiceResponse(
     val enteredBy: String,
     val status: String,
     val matchedOn: LocalDate?,
+    val overrideApprovedBy: String?,
+    val overrideReason: String?,
     val amount: MoneyDto,
     val lines: List<InvoiceLineResponse>,
     val exceptions: List<MatchExceptionResponse>,
@@ -102,6 +111,7 @@ data class VendorInvoiceResponse(
     companion object {
         fun from(invoice: VendorInvoice): VendorInvoiceResponse {
             val status = invoice.status
+            val override = (status as? InvoiceStatus.Matched)?.override
             return VendorInvoiceResponse(
                 id = invoice.id.toString(),
                 vendorId = invoice.details.vendorId.toString(),
@@ -111,6 +121,8 @@ data class VendorInvoiceResponse(
                 enteredBy = invoice.enteredBy,
                 status = status.code,
                 matchedOn = (status as? InvoiceStatus.Matched)?.matchedOn?.value,
+                overrideApprovedBy = override?.approvedBy,
+                overrideReason = override?.reason,
                 amount = MoneyDto.from(invoice.amount),
                 lines =
                     invoice.lines.map {
@@ -135,6 +147,7 @@ data class VendorInvoiceResponse(
 class VendorInvoiceController(
     private val enterVendorInvoice: EnterVendorInvoice,
     private val rematchVendorInvoice: RematchVendorInvoice,
+    private val overrideMatchException: OverrideMatchException,
     private val queries: InvoiceQueries,
 ) {
     /** Enters an invoice and matches it at once; the response says whether it matched. */
@@ -169,6 +182,20 @@ class VendorInvoiceController(
     ): VendorInvoiceResponse {
         val invoiceId = invoiceId(id)
         rematchVendorInvoice.handle(invoiceId)
+        return VendorInvoiceResponse.from(queries.find(invoiceId))
+    }
+
+    /**
+     * Accepts an invoice whose case cost is outside tolerance. For an accounting manager other than the person
+     * who entered the invoice.
+     */
+    @PostMapping("/{id}/override")
+    fun override(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): VendorInvoiceResponse {
+        val invoiceId = invoiceId(id)
+        overrideMatchException.handle(invoiceId, requireNotNull(request.reason))
         return VendorInvoiceResponse.from(queries.find(invoiceId))
     }
 

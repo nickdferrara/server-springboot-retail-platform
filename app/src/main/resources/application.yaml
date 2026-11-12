@@ -68,6 +68,8 @@ retail:
   payables:
     # An open goods-received-not-invoiced accrual older than this many days is flagged as stale.
     stale-accrual-days: 60
+    # A voucher for a vendor whose payment terms are not known yet falls due this many days after its invoice.
+    default-net-days: 30
     match:
       # An invoice line matches when its case cost is within this percentage of the purchase order's and its
       # total is within this amount of purchase order cost, in the invoice's currency.

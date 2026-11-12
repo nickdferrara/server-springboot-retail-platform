@@ -5,6 +5,7 @@ import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.payables.api.events.InvoiceMatched
+import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.Money
@@ -90,6 +91,36 @@ class InvoiceMatchedPostingRule : PostingRule<InvoiceMatched> {
             businessDate = event.businessDate,
             source = EntrySource("payables", event.eventId, "Invoice ${event.invoice.vendorInvoiceNumber}"),
             description = "Vendor invoice ${event.invoice.vendorInvoiceNumber} matched",
+            lines = lines,
+        )
+    }
+}
+
+/**
+ * Vendor payment issued: debit accounts payable for what the vouchers owed, credit the bank for what was paid,
+ * and credit purchase discounts taken for the early-payment discount.
+ */
+@Component
+class PaymentIssuedPostingRule : PostingRule<PaymentIssued> {
+    override fun posting(event: PaymentIssued): Posting? {
+        val currency = Currency.getInstance(event.currency)
+        val lines =
+            listOf(
+                PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.DEBIT, Money.of(event.grossAmount, currency)),
+                PostingLine(PostingAccount.BANK, EntrySide.CREDIT, Money.of(event.netAmount, currency)),
+                PostingLine(
+                    PostingAccount.PURCHASE_DISCOUNTS_TAKEN,
+                    EntrySide.CREDIT,
+                    Money.of(event.discountAmount, currency),
+                ),
+            ).filterNot { it.amount.isZero }
+        if (lines.isEmpty()) return null
+
+        return Posting(
+            journal = Journal.CASH_DISBURSEMENTS,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Payment ${event.paymentNumber}"),
+            description = "Vendor payment ${event.paymentNumber}",
             lines = lines,
         )
     }

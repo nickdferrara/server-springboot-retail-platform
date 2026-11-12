@@ -3,7 +3,9 @@ package com.retailplatform.payables.application
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.InvoiceDetails
 import com.retailplatform.payables.domain.MatchOutcome
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.MatchTolerance
+import com.retailplatform.payables.domain.OverrideDoesNotResolve
 import com.retailplatform.payables.domain.ThreeWayMatch
 import com.retailplatform.payables.domain.VendorInvoice
 import com.retailplatform.payables.domain.VendorInvoiceNumber
@@ -43,28 +45,43 @@ interface VendorInvoiceRepository {
 
 /**
  * Runs the three-way match for an invoice against the open accruals of its purchase order, and saves what the
- * match changed: the invoice's status and, when it matched, the accruals it relieved.
+ * match changed: the invoice's status and, when it matched, the accruals it relieved and the voucher released for
+ * it.
  */
 @Component
 class InvoiceMatching(
     private val invoices: VendorInvoiceRepository,
     private val accruals: AccrualRepository,
+    private val voucherRelease: VoucherRelease,
     private val properties: PayablesProperties,
     private val events: ApplicationEventPublisher,
     private val clock: Clock,
 ) {
-    fun match(invoice: VendorInvoice) {
+    /**
+     * With [override], a case cost outside tolerance is accepted.
+     *
+     * @throws OverrideDoesNotResolve if the invoice still does not match with its price accepted.
+     */
+    fun match(
+        invoice: VendorInvoice,
+        override: MatchOverride? = null,
+    ) {
+        invoice.requireMatchable(override)
         val tolerance =
             MatchTolerance.of(
                 Percentage.of(properties.match.priceTolerancePercent),
                 properties.match.priceToleranceAmount,
             )
         val open = accruals.findOpenByPurchaseOrder(invoice.details.purchaseOrderId)
-        val outcome = ThreeWayMatch(tolerance).match(invoice, open)
+        val outcome = ThreeWayMatch(tolerance).match(invoice, open, acceptPrice = override != null)
+        if (override != null && outcome is MatchOutcome.Exceptions) throw OverrideDoesNotResolve(invoice.details.number)
 
-        invoice.record(outcome, clock)
+        invoice.record(outcome, clock, override)
         invoices.save(invoice)
-        if (outcome is MatchOutcome.Matched) open.forEach(accruals::save)
+        if (outcome is MatchOutcome.Matched) {
+            open.forEach(accruals::save)
+            voucherRelease.releaseFor(invoice)
+        }
         invoice.releaseEvents().forEach(events::publishEvent)
     }
 }
@@ -99,6 +116,28 @@ class RematchVendorInvoice(
     fun handle(invoiceId: InvoiceId) {
         val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
         matching.match(invoice)
+    }
+}
+
+/**
+ * Use case: accept an invoice whose case cost is outside tolerance. The approver is an accounting manager other
+ * than the person who entered the invoice, and says why. The invoice then counts as matched: its accruals are
+ * relieved, the whole difference goes to purchase price variance, and its voucher is released.
+ */
+@Service
+class OverrideMatchException(
+    private val invoices: VendorInvoiceRepository,
+    private val matching: InvoiceMatching,
+    private val currentUser: CurrentUser,
+) {
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        invoiceId: InvoiceId,
+        reason: String,
+    ) {
+        val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
+        matching.match(invoice, MatchOverride.of(currentUser.name, reason))
     }
 }
 

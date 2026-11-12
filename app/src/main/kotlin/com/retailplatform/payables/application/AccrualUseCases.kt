@@ -57,6 +57,8 @@ data class OpenBalance(
 data class PayablesProperties(
     /** An open accrual older than this many days is flagged as stale. */
     val staleAccrualDays: Long = 60,
+    /** A voucher for a vendor whose payment terms are not known yet falls due this many days after its invoice. */
+    val defaultNetDays: Int = 30,
     val match: MatchProperties = MatchProperties(),
 ) {
     /** How far an invoice line's cost may differ from the purchase order's and still match. */
