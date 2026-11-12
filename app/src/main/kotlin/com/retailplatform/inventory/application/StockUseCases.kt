@@ -45,6 +45,15 @@ class StockLevels(
         }
     }
 
+    /** The stock level a command is about to change, held for this transaction so no other change interleaves. */
+    fun forChange(
+        itemId: ItemId,
+        location: StockLocation,
+    ): StockLevel {
+        levels.lock(itemId, location)
+        return at(itemId, location)
+    }
+
     private fun exists(location: StockLocation): Boolean =
         when (location) {
             is StockLocation.Warehouse -> warehouses.exists(location.warehouseId)
@@ -87,7 +96,7 @@ class AdjustInventory(
     @RequiresRole(Roles.INVENTORY_CONTROLLER)
     @Transactional
     fun handle(command: AdjustInventoryCommand): InventoryMovement {
-        val level = stockLevels.at(command.itemId, command.location)
+        val level = stockLevels.forChange(command.itemId, command.location)
         val movement = level.adjust(command.quantity, command.reason, command.unitCost, clock)
         posting.post(level, movement)
         return movement
@@ -112,7 +121,7 @@ class RecordCycleCount(
     @RequiresRole(Roles.INVENTORY_CONTROLLER)
     @Transactional
     fun handle(command: RecordCycleCountCommand): InventoryMovement? {
-        val level = stockLevels.at(command.itemId, command.location)
+        val level = stockLevels.forChange(command.itemId, command.location)
         return level.count(command.counted, command.unitCost, clock)?.also { posting.post(level, it) }
     }
 }

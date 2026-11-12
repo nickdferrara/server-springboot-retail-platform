@@ -6,6 +6,9 @@ import com.retailplatform.catalog.api.events.ItemFacts
 import com.retailplatform.inventory.api.events.InventoryAdjusted
 import com.retailplatform.inventory.application.AdjustInventory
 import com.retailplatform.inventory.application.AdjustInventoryCommand
+import com.retailplatform.inventory.application.ReceiveStock
+import com.retailplatform.inventory.application.ReceiveStockCommand
+import com.retailplatform.inventory.application.ReceivedStock
 import com.retailplatform.inventory.application.RecordCycleCount
 import com.retailplatform.inventory.application.RecordCycleCountCommand
 import com.retailplatform.inventory.application.RegisterStockedItem
@@ -15,6 +18,7 @@ import com.retailplatform.inventory.domain.AdjustmentExceedsOnHand
 import com.retailplatform.inventory.domain.AdjustmentReason
 import com.retailplatform.inventory.domain.CostNotKnown
 import com.retailplatform.inventory.domain.ItemNotKnownToInventory
+import com.retailplatform.inventory.domain.MovementSource
 import com.retailplatform.inventory.domain.MovementType
 import com.retailplatform.inventory.domain.QuantityNotInBaseUnit
 import com.retailplatform.inventory.domain.StockLocation
@@ -58,6 +62,9 @@ import java.math.BigDecimal
 import java.time.Clock
 import java.time.ZoneOffset
 import java.util.Optional
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import java.util.function.Supplier
 
 /** Runs with the locations module too: stock is only kept at a warehouse or store that exists. */
@@ -67,6 +74,7 @@ import java.util.function.Supplier
 class InventoryModuleTest(
     @Autowired private val adjustInventory: AdjustInventory,
     @Autowired private val recordCycleCount: RecordCycleCount,
+    @Autowired private val receiveStock: ReceiveStock,
     @Autowired private val stock: StockQueries,
     @Autowired private val registerStockedItem: RegisterStockedItem,
     @Autowired private val stockedItems: StockedItemRepository,
@@ -152,6 +160,43 @@ class InventoryModuleTest(
         ledger.fold(each(0)) { sum, movement -> sum + movement.quantity } shouldBe level.onHand
         stock.onHand(warehouse, PageQuery.of()).items.map { it.itemId } shouldContain itemId
         recordedBy(ledger.first().id.value) shouldBe "counter"
+    }
+
+    @Test
+    fun `receipts for the same item arriving together are all taken into stock`() {
+        val itemId = item("700006")
+        val together = 8
+        val start = CountDownLatch(1)
+        val pool = Executors.newFixedThreadPool(together)
+
+        val receipts =
+            (1..together).map {
+                pool.submit {
+                    start.await()
+                    receiveStock.handle(
+                        ReceiveStockCommand(
+                            location = warehouse,
+                            businessDate = today,
+                            source = MovementSource("Receipt $it", EventId.generate(clock)),
+                            lines = listOf(ReceivedStock(itemId, BigDecimal(12), usd("1.50"))),
+                        ),
+                    )
+                }
+            }
+        start.countDown()
+        receipts.forEach { it.get(30, TimeUnit.SECONDS) }
+        pool.shutdown()
+
+        val level = stock.onHand(itemId, warehouse)
+        level.onHand shouldBe each(12 * together)
+        level.averageCost shouldBe usd("1.50")
+        val ledger = stock.movements(itemId, warehouse, PageQuery.of()).items
+        ledger.size shouldBe together
+        ledger
+            .map {
+                it.after.onHand.amount
+                    .toInt()
+            }.sorted() shouldBe (1..together).map { it * 12 }
     }
 
     @Test

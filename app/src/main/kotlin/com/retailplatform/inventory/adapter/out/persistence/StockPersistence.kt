@@ -22,6 +22,7 @@ import org.springframework.data.domain.Sort
 import org.springframework.data.relational.core.mapping.Embedded
 import org.springframework.data.relational.core.mapping.Table
 import org.springframework.data.repository.CrudRepository
+import org.springframework.jdbc.core.simple.JdbcClient
 import org.springframework.stereotype.Repository
 import java.math.BigDecimal
 import java.util.Currency
@@ -88,6 +89,7 @@ interface StockLevelJdbcRepository : CrudRepository<StockLevelEntity, UUID> {
 @Repository
 class JdbcStockLevelRepository(
     private val levels: StockLevelJdbcRepository,
+    private val jdbc: JdbcClient,
 ) : StockLevelRepository {
     override fun save(level: StockLevel) {
         // An update keeps the stored creation stamp; the version check refuses a stale write.
@@ -106,6 +108,18 @@ class JdbcStockLevelRepository(
                 audit = audit,
             ),
         )
+    }
+
+    override fun lock(
+        itemId: ItemId,
+        location: StockLocation,
+    ) {
+        // A transaction-scoped advisory lock: it needs no row to exist and is released at commit or rollback.
+        jdbc
+            .sql("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))")
+            .param("key", "inventory.stock_level:${itemId.value}:${location.type}:${location.id}")
+            .query { _, _ -> Unit }
+            .list()
     }
 
     override fun find(
