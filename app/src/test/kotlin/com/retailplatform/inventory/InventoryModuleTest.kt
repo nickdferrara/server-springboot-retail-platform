@@ -32,6 +32,8 @@ import com.retailplatform.locations.domain.LocationName
 import com.retailplatform.locations.domain.StoreNumber
 import com.retailplatform.locations.domain.WarehouseNumber
 import com.retailplatform.platform.security.Roles
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrected
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrectionLine
 import com.retailplatform.receiving.api.events.DirectDeliveryFacts
 import com.retailplatform.receiving.api.events.DirectDeliveryLine
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
@@ -242,6 +244,51 @@ class InventoryModuleTest(
         val movements = stock.movements(cola, store, PageQuery.of()).items
         movements.map { it.type } shouldBe listOf(MovementType.VENDOR_RETURN, MovementType.RECEIPT)
         movements.first().source.reference shouldBe "Receipt 100077"
+    }
+
+    @Test
+    fun `a corrected delivery takes back out what was over-counted and puts back what was not returned`(
+        scenario: Scenario,
+    ) {
+        val cola = item("700012")
+        val storeId = (store as StockLocation.Store).storeId
+        receiveStock.handle(
+            ReceiveStockCommand(
+                store,
+                today,
+                MovementSource("Receipt 100078", null),
+                listOf(ReceivedStock(cola, BigDecimal(22), usd("1.25"))),
+            ),
+        )
+        val event =
+            DirectDeliveryCorrected(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                delivery =
+                    DirectDeliveryFacts(
+                        DirectDeliveryId.generate(clock),
+                        "100078",
+                        VendorId.generate(clock),
+                        storeId,
+                        "T-2",
+                    ),
+                correctionReceiptNumber = "100079",
+                reason = "Miscounted",
+                currency = "USD",
+                lines = listOf(DirectDeliveryCorrectionLine(cola, -2, -1, BigDecimal("1.2500"))),
+            )
+
+        scenario
+            .publish(event)
+            .andWaitForStateChange(
+                Supplier { Optional.of(stock.onHand(cola, store)).filter { it.onHand == each(21) } },
+            ).andVerify { it.isPresent shouldBe true }
+
+        val movements = stock.movements(cola, store, PageQuery.of()).items
+        movements.take(2).map { it.type to it.quantity } shouldBe
+            listOf(MovementType.VENDOR_RETURN to each(1), MovementType.RECEIPT to each(-2))
+        movements.first().source.reference shouldBe "Receipt 100079"
     }
 
     @Test

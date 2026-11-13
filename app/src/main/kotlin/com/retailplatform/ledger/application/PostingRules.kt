@@ -4,6 +4,7 @@ import com.retailplatform.ledger.domain.EntrySide
 import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
+import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
@@ -200,4 +201,47 @@ class DirectDeliveryInvoiceMatchedPostingRule : PostingRule<DirectDeliveryInvoic
             lines = lines,
         )
     }
+}
+
+/**
+ * A store's receipt of a direct delivery was corrected: store inventory moves by the value of the units that
+ * changed, accrued direct delivery payables by the change in what is owed to the vendor, and accounts payable by
+ * the change in what the vendor owes as credits.
+ */
+@Component
+class DirectDeliveryCorrectionPostingRule : PostingRule<DirectDeliveryCorrectionRecorded> {
+    override fun posting(event: DirectDeliveryCorrectionRecorded): Posting? {
+        val currency = Currency.getInstance(event.currency)
+        val lines =
+            listOfNotNull(
+                line(PostingAccount.STORE_INVENTORY, EntrySide.DEBIT, Money.of(event.inventoryChange, currency)),
+                line(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.DEBIT, Money.of(event.creditChange, currency)),
+                line(
+                    PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES,
+                    EntrySide.CREDIT,
+                    Money.of(event.accrualChange, currency),
+                ),
+            )
+        if (lines.isEmpty()) return null
+
+        return Posting(
+            journal = Journal.INVENTORY,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Receipt ${event.correctionReceiptNumber}"),
+            description = "Correction to direct store delivery on ticket ${event.ticketNumber}",
+            lines = lines,
+        )
+    }
+
+    /** [amount] on [side] when it is an increase, on the other side when it is a decrease, and no line for zero. */
+    private fun line(
+        role: PostingAccount,
+        side: EntrySide,
+        amount: Money,
+    ): PostingLine? =
+        when {
+            amount.isZero -> null
+            amount.isPositive -> PostingLine(role, side, amount)
+            else -> PostingLine(role, if (side == EntrySide.DEBIT) EntrySide.CREDIT else EntrySide.DEBIT, -amount)
+        }
 }

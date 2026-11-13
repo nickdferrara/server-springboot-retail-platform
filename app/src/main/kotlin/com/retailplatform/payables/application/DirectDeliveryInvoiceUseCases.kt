@@ -36,6 +36,9 @@ interface DirectDeliveryInvoiceRepository {
 
     fun existsFor(ticket: BilledTicket): Boolean
 
+    /** The invoice entered for a ticket, if there is one. */
+    fun findFor(ticket: BilledTicket): DirectDeliveryInvoice?
+
     fun exists(
         vendorId: VendorId,
         number: VendorInvoiceNumber,

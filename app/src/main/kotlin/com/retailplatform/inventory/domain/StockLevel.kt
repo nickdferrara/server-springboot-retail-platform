@@ -91,6 +91,46 @@ class StockLevel private constructor(
     }
 
     /**
+     * Takes back out [quantity] that a receipt brought in by mistake, at the [unitCost] it came in at, so the
+     * receipt is undone exactly: the average cost moves back. On-hand may go below zero.
+     *
+     * @throws QuantityNotInBaseUnit if [quantity] is not in the item's base unit.
+     * @throws QuantityNotPositive unless [quantity] is above zero.
+     * @throws CostCurrencyMismatch if [unitCost] is in another currency than the average cost.
+     */
+    fun reverseReceipt(
+        quantity: Quantity,
+        unitCost: Money,
+        businessDate: BusinessDate,
+        source: MovementSource,
+        clock: Clock,
+    ): InventoryMovement {
+        requireBaseUnit(quantity)
+        if (!quantity.isPositive) throw QuantityNotPositive(quantity)
+        return post(Entry(MovementType.RECEIPT, reason = null, -quantity, businessDate, source), unitCost, clock)
+    }
+
+    /**
+     * Puts back [quantity] that was recorded as returned to its vendor by mistake. Like the return it undoes, it
+     * is valued at average cost; [creditedCost] is used only when no cost is known yet.
+     *
+     * @throws QuantityNotInBaseUnit if [quantity] is not in the item's base unit.
+     * @throws QuantityNotPositive unless [quantity] is above zero.
+     */
+    fun reverseVendorReturn(
+        quantity: Quantity,
+        creditedCost: Money,
+        businessDate: BusinessDate,
+        source: MovementSource,
+        clock: Clock,
+    ): InventoryMovement {
+        requireBaseUnit(quantity)
+        if (!quantity.isPositive) throw QuantityNotPositive(quantity)
+        val entry = Entry(MovementType.VENDOR_RETURN, reason = null, quantity, businessDate, source)
+        return post(entry, creditedCost.takeIf { averageCost == null }, clock)
+    }
+
+    /**
      * Corrects on-hand by [quantity], raising [InventoryAdjusted]. A reduction is valued at average cost. An
      * increase is valued at [unitCost] if given, otherwise at average cost.
      *
@@ -178,8 +218,9 @@ class StockLevel private constructor(
     }
 
     /**
-     * The weighted average once [incoming] at [cost] joins what is on hand. Stock that is at or below zero carries
-     * no value worth averaging, so the incoming cost becomes the average.
+     * The weighted average once [incoming] at [cost] joins what is on hand, or leaves it when [incoming] is
+     * negative. Stock that is at or below zero carries no value worth averaging, so the incoming cost becomes the
+     * average.
      */
     private fun averageAfter(
         incoming: Quantity,
@@ -189,7 +230,12 @@ class StockLevel private constructor(
         if (average == null || !onHand.isPositive) return cost
         val totalValue = onHand.amount * average.amount + incoming.amount * cost.amount
         val totalQuantity = onHand.amount + incoming.amount
-        return Money.of(totalValue.divide(totalQuantity, Money.SCALE, RoundingMode.HALF_EVEN), cost.currency)
+        // Stock taken back out can leave nothing, or nothing of value, to average: the average then stands.
+        return if (totalQuantity.signum() <= 0 || totalValue.signum() < 0) {
+            average
+        } else {
+            Money.of(totalValue.divide(totalQuantity, Money.SCALE, RoundingMode.HALF_EVEN), cost.currency)
+        }
     }
 
     private fun requireBaseUnit(quantity: Quantity) {

@@ -57,3 +57,74 @@ class StockDirectDelivery(
         }
     }
 }
+
+/**
+ * How a correction changed one item on a delivery, in base units at the ticket's [unitCost]: positive when more
+ * was delivered or returned than was on record, negative when less was.
+ */
+data class CorrectedStock(
+    val itemId: ItemId,
+    val unitsDeliveredChange: Int,
+    val unitsReturnedChange: Int,
+    val unitCost: Money,
+)
+
+data class CorrectDeliveredStockCommand(
+    val store: StockLocation.Store,
+    val businessDate: BusinessDate,
+    val source: MovementSource,
+    val lines: List<CorrectedStock>,
+)
+
+/**
+ * Use case: bring a store's stock in line with a corrected direct delivery. Units delivered by mistake leave at
+ * the ticket's cost, undoing the receipt exactly; units missed come in at it.
+ */
+@Service
+class CorrectDeliveredStock(
+    private val stockLevels: StockLevels,
+    private val posting: StockPosting,
+    private val clock: Clock,
+) {
+    @Transactional
+    fun handle(command: CorrectDeliveredStockCommand) {
+        // Items are taken in a fixed order, so two corrections sharing items never wait on each other in a circle.
+        command.lines.sortedBy { it.itemId.value }.forEach { line ->
+            delivered(command, line)
+            returned(command, line)
+        }
+    }
+
+    private fun delivered(
+        command: CorrectDeliveredStockCommand,
+        line: CorrectedStock,
+    ) {
+        if (line.unitsDeliveredChange == 0) return
+        val level = stockLevels.forChange(line.itemId, command.store)
+        val quantity = Quantity.of(BigDecimal(line.unitsDeliveredChange).abs(), level.onHand.unit)
+        val movement =
+            if (line.unitsDeliveredChange > 0) {
+                level.receive(quantity, line.unitCost, command.businessDate, command.source, clock)
+            } else {
+                level.reverseReceipt(quantity, line.unitCost, command.businessDate, command.source, clock)
+            }
+        posting.post(level, movement)
+    }
+
+    private fun returned(
+        command: CorrectDeliveredStockCommand,
+        line: CorrectedStock,
+    ) {
+        if (line.unitsReturnedChange == 0) return
+        // Read again: a change to units delivered has changed the stored level and its version.
+        val level = stockLevels.forChange(line.itemId, command.store)
+        val quantity = Quantity.of(BigDecimal(line.unitsReturnedChange).abs(), level.onHand.unit)
+        val movement =
+            if (line.unitsReturnedChange > 0) {
+                level.returnToVendor(quantity, line.unitCost, command.businessDate, command.source, clock)
+            } else {
+                level.reverseVendorReturn(quantity, line.unitCost, command.businessDate, command.source, clock)
+            }
+        posting.post(level, movement)
+    }
+}

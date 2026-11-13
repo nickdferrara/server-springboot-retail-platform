@@ -1,5 +1,7 @@
 package com.retailplatform.receiving.domain
 
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrected
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrectionLine
 import com.retailplatform.receiving.api.events.DirectDeliveryFacts
 import com.retailplatform.receiving.api.events.DirectDeliveryLine
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
@@ -108,7 +110,8 @@ data class DeliveryTicket(
 /**
  * A vendor's delivery straight to a store, checked in by the store manager from the driver's ticket: what went on
  * the shelf and what the driver took back. There is no purchase order; each item is costed at what was agreed
- * with the vendor for that store. It never changes once written.
+ * with the vendor for that store. It never changes once written; a mistake is put right by a
+ * [DeliveryCorrection].
  */
 class DirectDelivery private constructor(
     val id: DirectDeliveryId,
@@ -123,6 +126,114 @@ class DirectDelivery private constructor(
 
     /** What the vendor owes for everything it took back. */
     val returnedCost: Money get() = lines.map { it.returnedCost }.reduce(Money::plus)
+
+    /** What the ticket reads once [corrections] are applied to what was first checked in. */
+    fun currentLines(corrections: List<DeliveryCorrection>): List<DeliveredLine> {
+        val changes = corrections.flatMap { it.lines }
+        val known = lines.map { it.itemId }.toSet()
+        val added =
+            changes
+                .filterNot { it.itemId in known }
+                .distinctBy { it.itemId }
+                .mapIndexed {
+                    index,
+                    change,
+                    ->
+                    DeliveredLine(lines.size + index + 1, change.itemId, 0, 0, change.unitCost)
+                }
+        return (lines + added).map { line ->
+            val forItem = changes.filter { it.itemId == line.itemId }
+            line.copy(
+                unitsDelivered = line.unitsDelivered + forItem.sumOf { it.unitsDeliveredChange },
+                unitsReturned = line.unitsReturned + forItem.sumOf { it.unitsReturnedChange },
+            )
+        }
+    }
+
+    /**
+     * Corrects the delivery so that each item in [counts] reads what it should, given the [earlier] corrections,
+     * and raises [DirectDeliveryCorrected] with the changes. An item not yet on the ticket is added at the cost
+     * in [costs], the costs agreed on the day the delivery was checked in, so the ticket stays at one cost.
+     *
+     * @throws DeliveryItemRepeated if two counts are for the same item.
+     * @throws NoAgreedCost if an added item had no agreed cost for the vendor at the store.
+     * @throws CorrectionChangesNothing if every count is what is already on record.
+     * @throws CorrectionWouldVoidDelivery if nothing would be left delivered or returned.
+     */
+    fun correct(
+        header: ReceiptHeader,
+        reason: CorrectionReason,
+        counts: List<CorrectedCount>,
+        earlier: List<DeliveryCorrection>,
+        costs: Map<ItemId, Money>,
+        clock: Clock,
+    ): DeliveryCorrection {
+        val current = currentLines(earlier).associateBy { it.itemId }
+        val currency = lines.first().unitCost.currency
+        requireEachItemOnceWithCost(ticket, counts.map { it.itemId }, costs + current.mapValues { it.value.unitCost })
+        val changes =
+            counts.mapNotNull { count ->
+                val line = current[count.itemId]
+                val unitCost = line?.unitCost ?: costs.getValue(count.itemId)
+                if (unitCost.currency != currency) throw DeliveryInMixedCurrencies(ticket.number)
+                CorrectionLine(
+                    itemId = count.itemId,
+                    unitsDeliveredChange = count.unitsDelivered - (line?.unitsDelivered ?: 0),
+                    unitsReturnedChange = count.unitsReturned - (line?.unitsReturned ?: 0),
+                    unitCost = unitCost,
+                ).takeUnless { it.unitsDeliveredChange == 0 && it.unitsReturnedChange == 0 }
+            }
+        val correction =
+            DeliveryCorrection(
+                id = DeliveryCorrectionId.generate(clock),
+                deliveryId = id,
+                receiptNumber = header.number,
+                correctedOn = BusinessDate.today(clock),
+                correctedBy = header.receivedBy,
+                reason = reason,
+                lines = changes,
+            )
+        requireMeaningful(correction, earlier)
+        raise(corrected(correction, clock))
+        return correction
+    }
+
+    private fun requireMeaningful(
+        correction: DeliveryCorrection,
+        earlier: List<DeliveryCorrection>,
+    ) {
+        if (correction.lines.isEmpty()) throw CorrectionChangesNothing(ticket.number)
+        val left = currentLines(earlier + correction).sumOf { it.unitsDelivered + it.unitsReturned }
+        if (left == 0) throw CorrectionWouldVoidDelivery(ticket.number)
+    }
+
+    private fun corrected(
+        correction: DeliveryCorrection,
+        clock: Clock,
+    ) = DirectDeliveryCorrected(
+        eventId = EventId.generate(clock),
+        occurredAt = clock.instant(),
+        businessDate = correction.correctedOn,
+        delivery = facts(),
+        correctionReceiptNumber = correction.receiptNumber.value,
+        reason = correction.reason.value,
+        currency =
+            lines
+                .first()
+                .unitCost.currency.currencyCode,
+        lines =
+            correction.lines.map {
+                DirectDeliveryCorrectionLine(
+                    it.itemId,
+                    it.unitsDeliveredChange,
+                    it.unitsReturnedChange,
+                    it.unitCost.amount,
+                )
+            },
+    )
+
+    private fun facts() =
+        DirectDeliveryFacts(id, receiptNumber.value, ticket.vendorId, ticket.storeId, ticket.number.value)
 
     companion object {
         /**
@@ -197,7 +308,7 @@ class DirectDelivery private constructor(
         eventId = EventId.generate(clock),
         occurredAt = clock.instant(),
         businessDate = receivedOn,
-        delivery = DirectDeliveryFacts(id, receiptNumber.value, ticket.vendorId, ticket.storeId, ticket.number.value),
+        delivery = facts(),
         currency = currency,
         lines =
             lines.map {

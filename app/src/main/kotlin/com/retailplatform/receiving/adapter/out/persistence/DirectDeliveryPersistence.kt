@@ -4,7 +4,11 @@ import com.retailplatform.platform.persistence.AuditMetadata
 import com.retailplatform.receiving.application.AgreedCostRepository
 import com.retailplatform.receiving.application.DirectDeliveryRepository
 import com.retailplatform.receiving.domain.AgreedCost
+import com.retailplatform.receiving.domain.CorrectionLine
+import com.retailplatform.receiving.domain.CorrectionReason
 import com.retailplatform.receiving.domain.DeliveredLine
+import com.retailplatform.receiving.domain.DeliveryCorrection
+import com.retailplatform.receiving.domain.DeliveryCorrectionId
 import com.retailplatform.receiving.domain.DeliveryTicket
 import com.retailplatform.receiving.domain.DeliveryTicketNumber
 import com.retailplatform.receiving.domain.DirectDelivery
@@ -22,6 +26,7 @@ import org.springframework.data.annotation.Version
 import org.springframework.data.domain.PageRequest
 import org.springframework.data.domain.Pageable
 import org.springframework.data.domain.Sort
+import org.springframework.data.jdbc.repository.query.Query
 import org.springframework.data.relational.core.mapping.Embedded
 import org.springframework.data.relational.core.mapping.MappedCollection
 import org.springframework.data.relational.core.mapping.Table
@@ -62,6 +67,33 @@ data class DirectDeliveryLineEntity(
     val currency: String,
 )
 
+@Table(schema = "receiving", name = "direct_delivery_correction")
+data class DeliveryCorrectionEntity(
+    @Id val id: UUID,
+    val directDeliveryId: UUID,
+    val receiptNumber: String,
+    val correctedOn: LocalDate,
+    val correctedBy: String,
+    val reason: String,
+    @MappedCollection(idColumn = "direct_delivery_correction_id", keyColumn = "position")
+    val lines: List<DeliveryCorrectionLineEntity>,
+    @Version val version: Int = 0,
+    @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
+)
+
+@Table(schema = "receiving", name = "direct_delivery_correction_line")
+data class DeliveryCorrectionLineEntity(
+    val itemId: UUID,
+    val unitsDeliveredChange: Int,
+    val unitsReturnedChange: Int,
+    val unitCost: BigDecimal,
+    val currency: String,
+)
+
+interface DeliveryCorrectionJdbcRepository : CrudRepository<DeliveryCorrectionEntity, UUID> {
+    fun findByDirectDeliveryIdOrderById(directDeliveryId: UUID): List<DeliveryCorrectionEntity>
+}
+
 interface DirectDeliveryJdbcRepository :
     CrudRepository<DirectDeliveryEntity, UUID>,
     PagingAndSortingRepository<DirectDeliveryEntity, UUID> {
@@ -75,12 +107,63 @@ interface DirectDeliveryJdbcRepository :
         storeId: UUID,
         pageable: Pageable,
     ): org.springframework.data.domain.Page<DirectDeliveryEntity>
+
+    @Query("SELECT id FROM receiving.direct_delivery WHERE id = :id FOR UPDATE")
+    fun lock(id: UUID): UUID?
 }
 
 @Repository
 class JdbcDirectDeliveryRepository(
     private val deliveries: DirectDeliveryJdbcRepository,
+    private val corrections: DeliveryCorrectionJdbcRepository,
 ) : DirectDeliveryRepository {
+    override fun findForCorrection(id: DirectDeliveryId): DirectDelivery? =
+        deliveries.lock(id.value)?.let { findById(id) }
+
+    override fun addCorrection(correction: DeliveryCorrection) {
+        corrections.save(
+            DeliveryCorrectionEntity(
+                id = correction.id.value,
+                directDeliveryId = correction.deliveryId.value,
+                receiptNumber = correction.receiptNumber.value,
+                correctedOn = correction.correctedOn.value,
+                correctedBy = correction.correctedBy,
+                reason = correction.reason.value,
+                lines =
+                    correction.lines.map {
+                        DeliveryCorrectionLineEntity(
+                            itemId = it.itemId.value,
+                            unitsDeliveredChange = it.unitsDeliveredChange,
+                            unitsReturnedChange = it.unitsReturnedChange,
+                            unitCost = it.unitCost.amount,
+                            currency = it.unitCost.currency.currencyCode,
+                        )
+                    },
+            ),
+        )
+    }
+
+    override fun findCorrections(id: DirectDeliveryId): List<DeliveryCorrection> =
+        corrections.findByDirectDeliveryIdOrderById(id.value).map {
+            DeliveryCorrection(
+                id = DeliveryCorrectionId.of(it.id),
+                deliveryId = DirectDeliveryId.of(it.directDeliveryId),
+                receiptNumber = ReceiptNumber.of(it.receiptNumber),
+                correctedOn = BusinessDate(it.correctedOn),
+                correctedBy = it.correctedBy,
+                reason = CorrectionReason.of(it.reason),
+                lines =
+                    it.lines.map { line ->
+                        CorrectionLine(
+                            itemId = ItemId.of(line.itemId),
+                            unitsDeliveredChange = line.unitsDeliveredChange,
+                            unitsReturnedChange = line.unitsReturnedChange,
+                            unitCost = Money.of(line.unitCost, Currency.getInstance(line.currency)),
+                        )
+                    },
+            )
+        }
+
     override fun add(delivery: DirectDelivery) {
         deliveries.save(
             DirectDeliveryEntity(

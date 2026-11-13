@@ -2,6 +2,7 @@ package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
 import com.retailplatform.payables.domain.DeliveredTicket
+import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.VendorCredit
@@ -78,6 +79,34 @@ data class TicketAmountResponse(
     }
 }
 
+/** An amount owed to a vendor that a late correction brought to light, for accounting to settle. */
+data class DeliveryAdjustmentResponse(
+    val id: String,
+    val deliveryId: String,
+    val receiptNumber: String,
+    val vendorId: String,
+    val storeId: String,
+    val ticketNumber: String,
+    val recordedOn: LocalDate,
+    val kind: String,
+    val amount: MoneyDto,
+) {
+    companion object {
+        fun from(adjustment: DeliveryAdjustment) =
+            DeliveryAdjustmentResponse(
+                id = adjustment.id.toString(),
+                deliveryId = adjustment.ticket.deliveryId.toString(),
+                receiptNumber = adjustment.ticket.receiptNumber,
+                vendorId = adjustment.ticket.vendorId.toString(),
+                storeId = adjustment.ticket.storeId.toString(),
+                ticketNumber = adjustment.ticket.ticketNumber,
+                recordedOn = adjustment.ticket.receivedOn.value,
+                kind = adjustment.kind.name,
+                amount = MoneyDto.from(adjustment.amount),
+            )
+    }
+}
+
 @RestController
 @RequestMapping("/api/v1/payables")
 class DirectDeliveryPayablesController(
@@ -103,5 +132,19 @@ class DirectDeliveryPayablesController(
     ): PageResponse<TicketAmountResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
         return PageResponse.from(queries.credits(vendor, pageQuery(page, size))) { TicketAmountResponse.from(it) }
+    }
+
+    /**
+     * Amounts owed to a vendor that a late correction to a store's receipt brought to light, the oldest first.
+     * Nothing matches or pays them; accounting settles them with the vendor.
+     */
+    @GetMapping("/direct-delivery-adjustments")
+    fun adjustments(
+        @RequestParam vendorId: String,
+        @RequestParam(required = false) page: Int?,
+        @RequestParam(required = false) size: Int?,
+    ): PageResponse<DeliveryAdjustmentResponse> {
+        val vendor = mapRequest { VendorId.parse(vendorId) }
+        return PageResponse.from(queries.adjustments(vendor, pageQuery(page, size)), DeliveryAdjustmentResponse::from)
     }
 }

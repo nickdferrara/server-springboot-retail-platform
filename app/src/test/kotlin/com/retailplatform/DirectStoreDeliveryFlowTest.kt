@@ -72,6 +72,71 @@ class DirectStoreDeliveryFlowTest(
 
         stockedAccruedAndPosted(vendorId, storeId, itemId)
         invoiced(vendorId, storeId, itemId)
+        corrected(vendorId, storeId, itemId)
+    }
+
+    /**
+     * A second ticket is checked in as 22 units when 20 came. The vendor's invoice for 20 waits in exception
+     * until the manager corrects the receipt; then stock follows and the invoice matches without anyone touching
+     * it.
+     */
+    private fun corrected(
+        vendorId: String,
+        storeId: String,
+        itemId: String,
+    ) {
+        val delivery =
+            created(
+                post(
+                    "/api/v1/direct-deliveries",
+                    """
+                    {"vendorId": "$vendorId", "storeId": "$storeId", "ticketNumber": "T-5002",
+                     "lines": [{"itemId": "$itemId", "unitsDelivered": 22}]}
+                    """.trimIndent(),
+                ),
+            )
+        await().atMost(patience).untilAsserted {
+            mockMvc.get("/api/v1/payables/direct-delivery-accruals?vendorId=$vendorId").andExpect {
+                jsonPath("$.items[?(@.ticketNumber == 'T-5002')].amount.amount") { value(27.5) }
+            }
+        }
+        val invoice = created(bill(vendorId, storeId, itemId, "T-5002", "DSD-${System.nanoTime()}"))
+        mockMvc.get(invoice).andExpect {
+            jsonPath("$.status") { value("EXCEPTION") }
+            jsonPath("$.exceptions[0].reason") { value("QUANTITY_DIFFERS") }
+        }
+
+        post("$delivery/corrections", """{"reason": " ", "lines": [{"itemId": "$itemId", "unitsDelivered": 20}]}""")
+            .andExpect { status { isBadRequest() } }
+        post(
+            "$delivery/corrections",
+            """{"reason": "Recounted the shelf", "lines": [{"itemId": "$itemId", "unitsDelivered": 20}]}""",
+        ).andExpect {
+            status { isOk() }
+            jsonPath("$.lines[0].unitsDelivered") { value(20) }
+            jsonPath("$.deliveredCost.amount") { value(25.0) }
+            jsonPath("$.corrections[0].reason") { value("Recounted the shelf") }
+            jsonPath("$.corrections[0].lines[0].unitsDeliveredChange") { value(-2) }
+        }
+        post(
+            "$delivery/corrections",
+            """{"reason": "Again", "lines": [{"itemId": "$itemId", "unitsDelivered": 20}]}""",
+        ).andExpect {
+            status { isUnprocessableContent() }
+            jsonPath("$.code") { value("receiving.correction-changes-nothing") }
+        }
+
+        await().atMost(patience).untilAsserted {
+            mockMvc.get(invoice).andExpect { jsonPath("$.status") { value("MATCHED") } }
+            // 17 from the first ticket and 20 from this one.
+            mockMvc.get("/api/v1/inventory/on-hand/$itemId?storeId=$storeId").andExpect {
+                jsonPath("$.onHand.amount") { value(37.0) }
+            }
+        }
+        mockMvc.get("/api/v1/payables/direct-delivery-adjustments?vendorId=$vendorId").andExpect {
+            jsonPath("$.total") { value(0) }
+        }
+        mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect { jsonPath("$.balanced") { value(true) } }
     }
 
     private fun stockedAccruedAndPosted(

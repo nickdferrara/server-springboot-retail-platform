@@ -1,6 +1,7 @@
 package com.retailplatform.payables
 
 import com.retailplatform.TestcontainersConfiguration
+import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatchException
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.PayableVoucherReleased
@@ -13,12 +14,15 @@ import com.retailplatform.payables.application.EnterDirectDeliveryInvoice
 import com.retailplatform.payables.application.OverrideDirectDeliveryException
 import com.retailplatform.payables.application.PaymentQueries
 import com.retailplatform.payables.application.ProposePaymentRun
+import com.retailplatform.payables.application.RecordDeliveryCorrection
+import com.retailplatform.payables.application.RecordDeliveryCorrectionCommand
 import com.retailplatform.payables.application.RecordDirectDelivery
 import com.retailplatform.payables.application.RecordDirectDeliveryCommand
 import com.retailplatform.payables.application.RematchDirectDeliveryInvoice
 import com.retailplatform.payables.application.VoucherQueries
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
+import com.retailplatform.payables.domain.DeliveryAdjustmentKind
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.InvoiceAlreadyMatched
 import com.retailplatform.payables.domain.MatchOverride
@@ -30,6 +34,7 @@ import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.TicketExceptionReason
 import com.retailplatform.payables.domain.TicketInvoiceDetails
 import com.retailplatform.payables.domain.TicketInvoiceStatus
+import com.retailplatform.payables.domain.TicketUnitChange
 import com.retailplatform.payables.domain.VendorCreditId
 import com.retailplatform.payables.domain.VendorCreditStatus
 import com.retailplatform.payables.domain.VendorInvoiceNumber
@@ -73,6 +78,7 @@ import java.time.Clock
 @WithMockUser(username = "clerk", authorities = [Roles.ACCOUNTING_CLERK])
 class DirectDeliveryPayablesModuleTest(
     @Autowired private val recordDirectDelivery: RecordDirectDelivery,
+    @Autowired private val recordDeliveryCorrection: RecordDeliveryCorrection,
     @Autowired private val directDeliveries: DirectDeliveryPayablesQueries,
     @Autowired private val enterDirectDeliveryInvoice: EnterDirectDeliveryInvoice,
     @Autowired private val rematchDirectDeliveryInvoice: RematchDirectDeliveryInvoice,
@@ -261,6 +267,156 @@ class DirectDeliveryPayablesModuleTest(
     }
 
     @Test
+    fun `a correction before the invoice matches adjusts the accrual and credit, and matches the waiting invoice`(
+        scenario: Scenario,
+    ) {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        val ticket =
+            delivered(
+                vendorId,
+                storeId,
+                "T-70",
+                TicketAmountLine.of(cola, 22, usd("1.25")),
+                returned = listOf(TicketAmountLine.of(cola, 3, usd("1.25"))),
+            )
+        val invoiceId =
+            enterDirectDeliveryInvoice.handle(
+                ticketInvoice(vendorId, storeId, "T-70", "DSD-70", cola, 20, "1.25"),
+            )
+        directDeliveryInvoices.find(invoiceId).status.shouldBeInstanceOf<TicketInvoiceStatus.Exception>()
+
+        // The store recounts: 20 were delivered, not 22, and 2 were taken back, not 3.
+        scenario
+            .stimulate(
+                Runnable {
+                    recordDeliveryCorrection.handle(
+                        RecordDeliveryCorrectionCommand(
+                            ticket.copy(receiptNumber = "100091"),
+                            delivered = listOf(TicketUnitChange(cola, -2, usd("1.25"))),
+                            returned = listOf(TicketUnitChange(cola, -1, usd("1.25"))),
+                        ),
+                    )
+                },
+            ).andWaitForEventOfType(DirectDeliveryCorrectionRecorded::class.java)
+            .matching { it.vendorId == vendorId }
+            .toArriveAndVerify { event ->
+                event.accrualChange shouldBe BigDecimal("-2.5000")
+                event.creditChange shouldBe BigDecimal("-1.2500")
+                event.inventoryChange shouldBe BigDecimal("-1.2500")
+                event.correctionReceiptNumber shouldBe "100091"
+            }
+
+        // The invoice for 20 units now agrees with the receipt and matched without anyone touching it.
+        directDeliveryInvoices.find(invoiceId).status shouldBe TicketInvoiceStatus.Matched(today)
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("25.00")
+        credit(vendorId).amount shouldBe usd("2.50")
+        directDeliveries.adjustments(vendorId, PageQuery.of()).total shouldBe 0
+    }
+
+    @Test
+    fun `a correction after the invoice matched becomes a credit or an adjustment for accounting`(scenario: Scenario) {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        val chips = ItemId.generate(clock)
+        val ticket =
+            delivered(
+                vendorId,
+                storeId,
+                "T-80",
+                TicketAmountLine.of(cola, 20, usd("1.25")),
+                TicketAmountLine.of(chips, 10, usd("0.80")),
+            )
+        enterDirectDeliveryInvoice.handle(
+            TicketInvoiceDetails(
+                BilledTicket(vendorId, storeId, "T-80"),
+                VendorInvoiceNumber.of("DSD-80"),
+                today,
+                listOf(TicketAmountLine.of(cola, 20, usd("1.25")), TicketAmountLine.of(chips, 10, usd("0.80"))),
+            ),
+        )
+
+        // Too late for the accrual: 4 fewer colas become a credit, 5 more chips an adjustment, and 2 colas the
+        // driver took back a credit as well.
+        scenario
+            .stimulate(
+                Runnable {
+                    recordDeliveryCorrection.handle(
+                        RecordDeliveryCorrectionCommand(
+                            ticket.copy(receiptNumber = "100092"),
+                            delivered =
+                                listOf(
+                                    TicketUnitChange(cola, -4, usd("1.25")),
+                                    TicketUnitChange(chips, 5, usd("0.80")),
+                                ),
+                            returned = listOf(TicketUnitChange(cola, 2, usd("1.25"))),
+                        ),
+                    )
+                },
+            ).andWaitForEventOfType(DirectDeliveryCorrectionRecorded::class.java)
+            .matching { it.vendorId == vendorId }
+            .toArriveAndVerify { event ->
+                event.accrualChange shouldBe BigDecimal("4.0000")
+                event.creditChange shouldBe BigDecimal("7.5000")
+                event.inventoryChange shouldBe BigDecimal("-3.5000")
+            }
+
+        val newCredit = credit(vendorId)
+        newCredit.amount shouldBe usd("7.50")
+        newCredit.lines.single().units shouldBe 6
+        newCredit.ticket.receiptNumber shouldBe "100092"
+        val adjustment = directDeliveries.adjustments(vendorId, PageQuery.of()).items.single()
+        adjustment.kind shouldBe DeliveryAdjustmentKind.RECEIVED_AFTER_INVOICE
+        adjustment.amount shouldBe usd("4.00")
+        directDeliveries
+            .accruals(vendorId, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("33.00")
+    }
+
+    @Test
+    fun `fewer units returned once the credit is in use is an adjustment, and a correction waits for its delivery`() {
+        val vendorId = VendorId.generate(clock)
+        val cola = ItemId.generate(clock)
+        val creditId = invoicedWithCredit(vendorId, "T-90", "DSD-90")
+        val runId = proposePaymentRun.handle(PaymentWindow.of(today, today))
+        val ticket = credit(vendorId).ticket
+
+        recordDeliveryCorrection.handle(
+            RecordDeliveryCorrectionCommand(
+                ticket.copy(receiptNumber = "100093"),
+                delivered = emptyList(),
+                returned = listOf(TicketUnitChange(cola, -1, usd("1.25"))),
+            ),
+        )
+
+        credit(vendorId).id shouldBe creditId
+        credit(vendorId).amount shouldBe usd("5.00")
+        val adjustment = directDeliveries.adjustments(vendorId, PageQuery.of()).items.single()
+        adjustment.kind shouldBe DeliveryAdjustmentKind.RETURN_REVERSED_AFTER_CREDIT_USED
+        adjustment.amount shouldBe usd("1.25")
+        cancelPaymentRun.handle(runId)
+
+        // A correction that arrives before its delivery has been recorded fails, and is retried later.
+        shouldThrow<IllegalStateException> {
+            recordDeliveryCorrection.handle(
+                RecordDeliveryCorrectionCommand(
+                    ticket.copy(deliveryId = DirectDeliveryId.generate(clock)),
+                    delivered = listOf(TicketUnitChange(cola, 1, usd("1.25"))),
+                    returned = emptyList(),
+                ),
+            )
+        }
+    }
+
+    @Test
     fun `a payment run deducts the vendor's open credit from its payment`(scenario: Scenario) {
         val vendorId = VendorId.generate(clock)
         val creditId = invoicedWithCredit(vendorId, "T-50", "DSD-50")
@@ -352,14 +508,10 @@ class DirectDeliveryPayablesModuleTest(
         ticket: String,
         vararg delivered: TicketAmountLine,
         returned: List<TicketAmountLine> = emptyList(),
-    ) {
-        recordDirectDelivery.handle(
-            RecordDirectDeliveryCommand(
-                DeliveredTicket(DirectDeliveryId.generate(clock), "100090", vendorId, storeId, ticket, today),
-                delivered.toList(),
-                returned,
-            ),
-        )
+    ): DeliveredTicket {
+        val checkedIn = DeliveredTicket(DirectDeliveryId.generate(clock), "100090", vendorId, storeId, ticket, today)
+        recordDirectDelivery.handle(RecordDirectDeliveryCommand(checkedIn, delivered.toList(), returned))
+        return checkedIn
     }
 
     private fun ticketInvoice(

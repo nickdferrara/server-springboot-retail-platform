@@ -4,6 +4,7 @@ import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
+import com.retailplatform.ledger.application.DirectDeliveryCorrectionPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryReceivedPostingRule
 import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
@@ -21,6 +22,7 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.JournalEntryUnbalanced
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
+import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceFacts
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceFacts
@@ -287,6 +289,49 @@ class LedgerModuleTest(
         val withCredit = paymentIssued("25.0000", "0.0000", "20.0000").copy(creditAmount = BigDecimal("5.0000"))
         requireNotNull(PaymentIssuedPostingRule().posting(withCredit)).lines.map { it.role to it.amount } shouldBe
             listOf(PostingAccount.ACCOUNTS_PAYABLE to usd("20.00"), PostingAccount.BANK to usd("20.00"))
+    }
+
+    @Test
+    fun `a corrected direct delivery moves inventory, the accrual, and the vendor credit by what changed`() {
+        val rule = DirectDeliveryCorrectionPostingRule()
+
+        fun corrected(
+            inventory: String,
+            accrual: String,
+            credit: String,
+        ) = DirectDeliveryCorrectionRecorded(
+            eventId = EventId.generate(clock),
+            occurredAt = clock.instant(),
+            businessDate = today,
+            vendorId = VendorId.generate(clock),
+            storeId = StoreId.generate(clock),
+            ticketNumber = "T-70",
+            correctionReceiptNumber = "100091",
+            inventoryChange = BigDecimal(inventory),
+            accrualChange = BigDecimal(accrual),
+            creditChange = BigDecimal(credit),
+            currency = "USD",
+        )
+
+        // Two fewer delivered and one fewer returned: less inventory, less accrued, less credit.
+        val fewer = requireNotNull(rule.posting(corrected("-1.2500", "-2.5000", "-1.2500")))
+        fewer.lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.STORE_INVENTORY, EntrySide.CREDIT, usd("1.25")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("1.25")),
+                Triple(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, usd("2.50")),
+            )
+        fewer.journal shouldBe Journal.INVENTORY
+        postJournalEntry.handle(fewer)
+
+        // More delivered: more inventory and more accrued, with no credit line.
+        requireNotNull(rule.posting(corrected("4.0000", "4.0000", "0.0000"))).lines.map { it.role to it.side } shouldBe
+            listOf(
+                PostingAccount.STORE_INVENTORY to EntrySide.DEBIT,
+                PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES to EntrySide.CREDIT,
+            )
+        rule.posting(corrected("0.0000", "0.0000", "0.0000")) shouldBe null
+        ledger.trialBalance(today).isBalanced shouldBe true
     }
 
     private fun directDelivery(vararg lines: DirectDeliveryLine) =

@@ -4,19 +4,25 @@ import com.retailplatform.platform.web.MoneyDto
 import com.retailplatform.platform.web.PageResponse
 import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.platform.web.pageQuery
+import com.retailplatform.receiving.application.CorrectDirectDelivery
+import com.retailplatform.receiving.application.CorrectDirectDeliveryCommand
+import com.retailplatform.receiving.application.CorrectedDelivery
 import com.retailplatform.receiving.application.DirectDeliveryQueries
 import com.retailplatform.receiving.application.ReceiveDirectDelivery
 import com.retailplatform.receiving.application.ReceiveDirectDeliveryCommand
 import com.retailplatform.receiving.application.SetAgreedCost
 import com.retailplatform.receiving.application.SetAgreedCostCommand
 import com.retailplatform.receiving.domain.AgreedCost
+import com.retailplatform.receiving.domain.CorrectedCount
+import com.retailplatform.receiving.domain.CorrectionReason
+import com.retailplatform.receiving.domain.DeliveryCorrection
 import com.retailplatform.receiving.domain.DeliveryTicket
 import com.retailplatform.receiving.domain.DeliveryTicketNumber
-import com.retailplatform.receiving.domain.DirectDelivery
 import com.retailplatform.receiving.domain.TicketLine
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.ItemId
+import com.retailplatform.shared.Money
 import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import jakarta.validation.Valid
@@ -118,6 +124,68 @@ data class ReceiveDirectDeliveryRequest(
         }
 }
 
+data class CorrectedCountRequest(
+    @field:NotBlank
+    val itemId: String?,
+    @field:Min(0)
+    val unitsDelivered: Int = 0,
+    @field:Min(0)
+    val unitsReturned: Int = 0,
+)
+
+data class CorrectDirectDeliveryRequest(
+    @field:NotBlank @field:Size(max = CorrectionReason.MAX_LENGTH)
+    val reason: String?,
+    @field:NotEmpty @field:Valid
+    val lines: List<CorrectedCountRequest>?,
+) {
+    fun toCommand(deliveryId: DirectDeliveryId): CorrectDirectDeliveryCommand =
+        mapRequest {
+            CorrectDirectDeliveryCommand(
+                deliveryId = deliveryId,
+                reason = CorrectionReason.of(requireNotNull(reason)),
+                counts =
+                    requireNotNull(lines).map {
+                        CorrectedCount.of(ItemId.parse(requireNotNull(it.itemId)), it.unitsDelivered, it.unitsReturned)
+                    },
+            )
+        }
+}
+
+data class CorrectionLineResponse(
+    val itemId: String,
+    val unitsDeliveredChange: Int,
+    val unitsReturnedChange: Int,
+    val unitCost: MoneyDto,
+)
+
+data class DeliveryCorrectionResponse(
+    val receiptNumber: String,
+    val correctedOn: LocalDate,
+    val correctedBy: String,
+    val reason: String,
+    val lines: List<CorrectionLineResponse>,
+) {
+    companion object {
+        fun from(correction: DeliveryCorrection) =
+            DeliveryCorrectionResponse(
+                receiptNumber = correction.receiptNumber.value,
+                correctedOn = correction.correctedOn.value,
+                correctedBy = correction.correctedBy,
+                reason = correction.reason.value,
+                lines =
+                    correction.lines.map {
+                        CorrectionLineResponse(
+                            it.itemId.toString(),
+                            it.unitsDeliveredChange,
+                            it.unitsReturnedChange,
+                            MoneyDto.from(it.unitCost),
+                        )
+                    },
+            )
+    }
+}
+
 data class DeliveredLineResponse(
     val lineNumber: Int,
     val itemId: String,
@@ -128,6 +196,10 @@ data class DeliveredLineResponse(
     val returnedCost: MoneyDto,
 )
 
+/**
+ * A delivery as it reads now. [lines], [deliveredCost], and [returnedCost] include every correction;
+ * [corrections] lists them, oldest first.
+ */
 data class DirectDeliveryResponse(
     val id: String,
     val receiptNumber: String,
@@ -139,10 +211,13 @@ data class DirectDeliveryResponse(
     val deliveredCost: MoneyDto,
     val returnedCost: MoneyDto,
     val lines: List<DeliveredLineResponse>,
+    val corrections: List<DeliveryCorrectionResponse>,
 ) {
     companion object {
-        fun from(delivery: DirectDelivery) =
-            DirectDeliveryResponse(
+        fun from(corrected: CorrectedDelivery): DirectDeliveryResponse {
+            val delivery = corrected.delivery
+            val lines = delivery.currentLines(corrected.corrections)
+            return DirectDeliveryResponse(
                 id = delivery.id.toString(),
                 receiptNumber = delivery.receiptNumber.value,
                 vendorId = delivery.ticket.vendorId.toString(),
@@ -150,10 +225,10 @@ data class DirectDeliveryResponse(
                 ticketNumber = delivery.ticket.number.value,
                 receivedOn = delivery.receivedOn.value,
                 receivedBy = delivery.receivedBy,
-                deliveredCost = MoneyDto.from(delivery.deliveredCost),
-                returnedCost = MoneyDto.from(delivery.returnedCost),
+                deliveredCost = MoneyDto.from(lines.map { it.deliveredCost }.reduce(Money::plus)),
+                returnedCost = MoneyDto.from(lines.map { it.returnedCost }.reduce(Money::plus)),
                 lines =
-                    delivery.lines.map {
+                    lines.map {
                         DeliveredLineResponse(
                             lineNumber = it.lineNumber,
                             itemId = it.itemId.toString(),
@@ -164,7 +239,9 @@ data class DirectDeliveryResponse(
                             returnedCost = MoneyDto.from(it.returnedCost),
                         )
                     },
+                corrections = corrected.corrections.map(DeliveryCorrectionResponse::from),
             )
+        }
     }
 }
 
@@ -173,6 +250,7 @@ data class DirectDeliveryResponse(
 class DirectDeliveryController(
     private val receiveDirectDelivery: ReceiveDirectDelivery,
     private val setAgreedCost: SetAgreedCost,
+    private val correctDirectDelivery: CorrectDirectDelivery,
     private val queries: DirectDeliveryQueries,
 ) {
     /** Checks in a vendor's delivery at a store from the driver's ticket, in the items' base units. */
@@ -201,6 +279,20 @@ class DirectDeliveryController(
     fun get(
         @PathVariable id: String,
     ): DirectDeliveryResponse = DirectDeliveryResponse.from(queries.delivery(mapRequest { DirectDeliveryId.parse(id) }))
+
+    /**
+     * Corrects a delivery: each line says what the item should read. An item that was missed is added at the
+     * cost agreed on the day of the delivery.
+     */
+    @PostMapping("/{id}/corrections")
+    fun correct(
+        @PathVariable id: String,
+        @Valid @RequestBody request: CorrectDirectDeliveryRequest,
+    ): DirectDeliveryResponse {
+        val deliveryId = mapRequest { DirectDeliveryId.parse(id) }
+        correctDirectDelivery.handle(request.toCommand(deliveryId))
+        return DirectDeliveryResponse.from(queries.delivery(deliveryId))
+    }
 
     /** Sets what a vendor charges for one base unit of an item at each of the given stores, from a date on. */
     @PutMapping("/costs")
