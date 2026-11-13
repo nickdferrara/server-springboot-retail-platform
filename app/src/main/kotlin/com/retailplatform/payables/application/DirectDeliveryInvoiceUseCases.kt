@@ -1,11 +1,13 @@
 package com.retailplatform.payables.application
 
 import com.retailplatform.payables.domain.BilledTicket
+import com.retailplatform.payables.domain.DirectDeliveryAccrual
 import com.retailplatform.payables.domain.DirectDeliveryInvoice
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.MatchTolerance
 import com.retailplatform.payables.domain.OverrideDoesNotResolve
+import com.retailplatform.payables.domain.ShortPayNotPossible
 import com.retailplatform.payables.domain.TicketAlreadyInvoiced
 import com.retailplatform.payables.domain.TicketInvoiceDetails
 import com.retailplatform.payables.domain.TicketMatchOutcome
@@ -74,26 +76,54 @@ class TicketInvoiceMatching(
         override: MatchOverride? = null,
     ) {
         invoice.requireMatchable(override)
-        val tolerance =
-            MatchTolerance.of(
-                Percentage.of(properties.match.priceTolerancePercent),
-                properties.match.priceToleranceAmount,
-            )
         val accrual = accruals.findFor(invoice.details.ticket)
-        val outcome = TwoWayMatch(tolerance).match(invoice, accrual, acceptPrice = override != null)
+        val outcome = twoWayMatch().match(invoice, accrual, acceptPrice = override != null)
         if (override != null && outcome is TicketMatchOutcome.Exceptions) {
             throw OverrideDoesNotResolve(invoice.details.number)
         }
 
         invoice.record(outcome, clock, override)
         invoices.save(invoice)
-        if (outcome is TicketMatchOutcome.Matched && accrual != null) {
-            accrual.relieve(BusinessDate.today(clock))
-            accruals.save(accrual)
-            voucherRelease.releaseFor(invoice.matched())
-        }
+        if (outcome is TicketMatchOutcome.Matched && accrual != null) payable(invoice, accrual)
         invoice.releaseEvents().forEach(events::publishEvent)
     }
+
+    /**
+     * Pays [invoice] for what the store received and holds the rest back, on the word of [approval].
+     *
+     * @throws ShortPayNotPossible if the store's count leaves nothing to hold back or nothing to pay.
+     */
+    fun shortPay(
+        invoice: DirectDeliveryInvoice,
+        approval: MatchOverride,
+    ) {
+        invoice.requireMatchable(approval)
+        val accrual = accruals.findFor(invoice.details.ticket)
+        val payment = twoWayMatch().shortPay(invoice, accrual)
+
+        invoice.shortPay(payment, approval, clock)
+        invoices.save(invoice)
+        payable(invoice, checkNotNull(accrual))
+        invoice.releaseEvents().forEach(events::publishEvent)
+    }
+
+    /** The invoice is payable: its ticket's accrual is relieved and its voucher released. */
+    private fun payable(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual,
+    ) {
+        accrual.relieve(BusinessDate.today(clock))
+        accruals.save(accrual)
+        voucherRelease.releaseFor(invoice.matched())
+    }
+
+    private fun twoWayMatch() =
+        TwoWayMatch(
+            MatchTolerance.of(
+                Percentage.of(properties.match.priceTolerancePercent),
+                properties.match.priceToleranceAmount,
+            ),
+        )
 }
 
 /** Use case: enter a vendor's invoice for a direct store delivery ticket and match it to the store's receipt. */
@@ -157,6 +187,28 @@ class OverrideDirectDeliveryException(
     ) {
         val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
         matching.match(invoice, MatchOverride.of(currentUser.name, reason))
+    }
+}
+
+/**
+ * Use case: pay a direct delivery invoice short. When it bills more than the store received and the store's
+ * count stands, an accounting manager other than the person who entered the invoice pays for what was received
+ * and holds the rest back as a deduction against the vendor, and says why.
+ */
+@Service
+class ShortPayDirectDeliveryInvoice(
+    private val invoices: DirectDeliveryInvoiceRepository,
+    private val matching: TicketInvoiceMatching,
+    private val currentUser: CurrentUser,
+) {
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        invoiceId: InvoiceId,
+        reason: String,
+    ) {
+        val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
+        matching.shortPay(invoice, MatchOverride.of(currentUser.name, reason))
     }
 }
 

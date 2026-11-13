@@ -13,6 +13,7 @@ import com.retailplatform.platform.persistence.AuditMetadata
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
+import com.retailplatform.shared.Money
 import com.retailplatform.shared.Page
 import com.retailplatform.shared.PageQuery
 import com.retailplatform.shared.StoreId
@@ -28,6 +29,7 @@ import org.springframework.data.relational.core.mapping.Table
 import org.springframework.data.repository.CrudRepository
 import org.springframework.data.repository.PagingAndSortingRepository
 import org.springframework.stereotype.Repository
+import java.math.BigDecimal
 import java.time.LocalDate
 import java.util.Currency
 import java.util.UUID
@@ -47,6 +49,7 @@ data class DirectDeliveryInvoiceEntity(
     val matchedOn: LocalDate?,
     val overrideApprovedBy: String?,
     val overrideReason: String?,
+    val deduction: BigDecimal?,
     @MappedCollection(idColumn = "direct_delivery_invoice_id", keyColumn = "position")
     val lines: List<DirectDeliveryInvoiceLineEntity>,
     @MappedCollection(idColumn = "direct_delivery_invoice_id", keyColumn = "position")
@@ -102,7 +105,18 @@ class JdbcDirectDeliveryInvoiceRepository(
         val audit =
             if (invoice.version == 0) AuditMetadata() else invoices.findById(invoice.id.value).orElseThrow().audit
         val status = invoice.status
-        val override = (status as? TicketInvoiceStatus.Matched)?.override
+        val approval =
+            when (status) {
+                is TicketInvoiceStatus.Matched -> status.override
+                is TicketInvoiceStatus.ShortPaid -> status.approval
+                is TicketInvoiceStatus.Exception -> null
+            }
+        val matchedOn =
+            when (status) {
+                is TicketInvoiceStatus.Matched -> status.matchedOn
+                is TicketInvoiceStatus.ShortPaid -> status.matchedOn
+                is TicketInvoiceStatus.Exception -> null
+            }
         val ticket = invoice.details.ticket
         invoices.save(
             DirectDeliveryInvoiceEntity(
@@ -115,9 +129,10 @@ class JdbcDirectDeliveryInvoiceRepository(
                 currency = invoice.amount.currency.currencyCode,
                 enteredBy = invoice.enteredBy,
                 status = status.code,
-                matchedOn = (status as? TicketInvoiceStatus.Matched)?.matchedOn?.value,
-                overrideApprovedBy = override?.approvedBy,
-                overrideReason = override?.reason,
+                matchedOn = matchedOn?.value,
+                overrideApprovedBy = approval?.approvedBy,
+                overrideReason = approval?.reason,
+                deduction = (status as? TicketInvoiceStatus.ShortPaid)?.deduction?.amount,
                 lines = invoice.lines.toEntities().map(::DirectDeliveryInvoiceLineEntity),
                 exceptions =
                     (status as? TicketInvoiceStatus.Exception)?.exceptions.orEmpty().map {
@@ -170,19 +185,30 @@ class JdbcDirectDeliveryInvoiceRepository(
                     lines = lines.map { it.line.toDomain(money) },
                 ),
             enteredBy = enteredBy,
-            status =
-                matchedOn?.let { TicketInvoiceStatus.Matched(BusinessDate(it), override()) }
-                    ?: TicketInvoiceStatus.Exception(
-                        exceptions.map {
-                            TicketException(
-                                it.itemId?.let(ItemId::of),
-                                TicketExceptionReason.valueOf(it.reason),
-                                it.detail,
-                            )
-                        },
-                    ),
+            status = status(money),
             version = version,
         )
+    }
+
+    private fun DirectDeliveryInvoiceEntity.status(money: Currency): TicketInvoiceStatus {
+        val approval = override()
+        return when {
+            matchedOn == null -> {
+                TicketInvoiceStatus.Exception(
+                    exceptions.map {
+                        TicketException(it.itemId?.let(ItemId::of), TicketExceptionReason.valueOf(it.reason), it.detail)
+                    },
+                )
+            }
+
+            deduction != null && approval != null -> {
+                TicketInvoiceStatus.ShortPaid(BusinessDate(matchedOn), approval, Money.of(deduction, money))
+            }
+
+            else -> {
+                TicketInvoiceStatus.Matched(BusinessDate(matchedOn), approval)
+            }
+        }
     }
 
     private fun DirectDeliveryInvoiceEntity.override(): MatchOverride? =

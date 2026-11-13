@@ -172,13 +172,14 @@ class DirectDeliveryReceivedPostingRule : PostingRule<DirectDeliveryReceived> {
 
 /**
  * Direct store delivery invoice matched: debit accrued direct delivery payables for what was accrued, credit
- * accounts payable for what the vendor billed, and put the difference to purchase price variance.
+ * accounts payable for what is owed to the vendor, and put the difference to purchase price variance.
  */
 @Component
 class DirectDeliveryInvoiceMatchedPostingRule : PostingRule<DirectDeliveryInvoiceMatched> {
     override fun posting(event: DirectDeliveryInvoiceMatched): Posting? {
         val currency = Currency.getInstance(event.currency)
-        val billed = Money.of(event.invoiceAmount, currency)
+        // What is owed: what the vendor billed, less anything held back for units billed but not received.
+        val billed = Money.of(event.invoiceAmount - event.deductionAmount, currency)
         val accrued = Money.of(event.accruedAmount, currency)
         val variance = billed - accrued
         val lines =

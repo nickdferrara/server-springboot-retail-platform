@@ -190,7 +190,16 @@ class DirectStoreDeliveryFlowTest(
         }
         mockMvc.get("/api/v1/payables/direct-delivery-invoices?exceptionsOnly=true").andExpect {
             jsonPath("$.items[0].ticketNumber") { value("T-9999") }
+            jsonPath("$.items[0].payable") { doesNotExist() }
         }
+        // With sign-in off the person asking is the person who entered the invoice, so short-pay is refused.
+        val waiting = mockMvc.get("/api/v1/payables/direct-delivery-invoices?exceptionsOnly=true").andReturn()
+        val waitingId = Regex("\"id\":\"([0-9a-f-]{36})\"").find(waiting.response.contentAsString)?.groupValues?.get(1)
+        post("/api/v1/payables/direct-delivery-invoices/$waitingId/short-pay", """{"reason": "Nothing came"}""")
+            .andExpect {
+                status { isUnprocessableContent() }
+                jsonPath("$.code") { value("payables.override-by-invoice-creator") }
+            }
 
         val invoice = created(bill(vendorId, storeId, itemId, "T-5001", "DSD-${System.nanoTime()}"))
         mockMvc.get(invoice).andExpect {

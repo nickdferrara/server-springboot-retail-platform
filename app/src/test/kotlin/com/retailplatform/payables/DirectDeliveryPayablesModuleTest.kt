@@ -19,6 +19,7 @@ import com.retailplatform.payables.application.RecordDeliveryCorrectionCommand
 import com.retailplatform.payables.application.RecordDirectDelivery
 import com.retailplatform.payables.application.RecordDirectDeliveryCommand
 import com.retailplatform.payables.application.RematchDirectDeliveryInvoice
+import com.retailplatform.payables.application.ShortPayDirectDeliveryInvoice
 import com.retailplatform.payables.application.VoucherQueries
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
@@ -29,6 +30,7 @@ import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.OverrideByInvoiceCreator
 import com.retailplatform.payables.domain.OverrideDoesNotResolve
 import com.retailplatform.payables.domain.PaymentWindow
+import com.retailplatform.payables.domain.ShortPayNotPossible
 import com.retailplatform.payables.domain.TicketAlreadyInvoiced
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.TicketExceptionReason
@@ -83,6 +85,7 @@ class DirectDeliveryPayablesModuleTest(
     @Autowired private val enterDirectDeliveryInvoice: EnterDirectDeliveryInvoice,
     @Autowired private val rematchDirectDeliveryInvoice: RematchDirectDeliveryInvoice,
     @Autowired private val overrideDirectDeliveryException: OverrideDirectDeliveryException,
+    @Autowired private val shortPayInvoice: ShortPayDirectDeliveryInvoice,
     @Autowired private val directDeliveryInvoices: DirectDeliveryInvoiceQueries,
     @Autowired private val vouchers: VoucherQueries,
     @Autowired private val proposePaymentRun: ProposePaymentRun,
@@ -414,6 +417,63 @@ class DirectDeliveryPayablesModuleTest(
                 ),
             )
         }
+    }
+
+    @Test
+    fun `an accounting manager who did not enter the invoice pays it short for what the store received`(
+        scenario: Scenario,
+    ) {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        delivered(vendorId, storeId, "T-95", TicketAmountLine.of(cola, 18, usd("1.25")))
+        val id = enterDirectDeliveryInvoice.handle(ticketInvoice(vendorId, storeId, "T-95", "DSD-95", cola, 20, "1.25"))
+
+        // A clerk does not short-pay, nor does a manager who entered the invoice.
+        shouldThrow<AccessDeniedException> { shortPayInvoice.handle(id, "Store count stands") }
+        actingAs("clerk", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<OverrideByInvoiceCreator> { shortPayInvoice.handle(id, "Store count stands") }
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        scenario
+            .stimulate(Runnable { shortPayInvoice.handle(id, "Store count confirmed with the driver") })
+            .andWaitForEventOfType(DirectDeliveryInvoiceMatched::class.java)
+            .matching { it.invoice.invoiceId == id }
+            .toArriveAndVerify { event ->
+                event.invoiceAmount shouldBe BigDecimal("25.0000")
+                event.deductionAmount shouldBe BigDecimal("2.5000")
+                event.accruedAmount shouldBe BigDecimal("22.5000")
+                event.costVariance shouldBe BigDecimal("0.0000")
+            }
+
+        directDeliveryInvoices.find(id).status shouldBe
+            TicketInvoiceStatus.ShortPaid(
+                today,
+                MatchOverride.of("manager", "Store count confirmed with the driver"),
+                usd("2.50"),
+            )
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("22.50")
+        directDeliveries
+            .accruals(vendorId, PageQuery.of())
+            .items
+            .single()
+            .isOpen shouldBe false
+        shouldThrow<InvoiceAlreadyMatched> { shortPayInvoice.handle(id, "Again") }
+        shouldThrow<ResourceNotFound> { shortPayInvoice.handle(InvoiceId.generate(clock), "Missing") }
+
+        // An invoice that bills no more than was received has nothing to hold back.
+        delivered(vendorId, storeId, "T-96", TicketAmountLine.of(cola, 20, usd("1.25")))
+        actingAs("clerk", Roles.ACCOUNTING_CLERK)
+        val under =
+            enterDirectDeliveryInvoice.handle(
+                ticketInvoice(vendorId, storeId, "T-96", "DSD-96", cola, 15, "1.25"),
+            )
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<ShortPayNotPossible> { shortPayInvoice.handle(under, "Nothing to hold back") }
     }
 
     @Test
