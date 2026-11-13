@@ -34,7 +34,10 @@ data class TicketAmountLineResponse(
     }
 }
 
-/** A direct delivery accrual or a vendor credit: an amount for one delivery ticket. [id] is `null` for an accrual. */
+/**
+ * A direct delivery accrual or a vendor credit: an amount for one delivery ticket. [id] is `null` for an accrual.
+ * [status] is `OPEN` or `RELIEVED` for an accrual, and `OPEN`, `SCHEDULED`, or `APPLIED` for a credit.
+ */
 data class TicketAmountResponse(
     val id: String?,
     val deliveryId: String,
@@ -44,17 +47,21 @@ data class TicketAmountResponse(
     val ticketNumber: String,
     val receivedOn: LocalDate,
     val amount: MoneyDto,
+    val status: String,
     val lines: List<TicketAmountLineResponse>,
 ) {
     companion object {
-        fun from(accrual: DirectDeliveryAccrual) = of(null, accrual.ticket, accrual.amount, accrual.lines)
+        fun from(accrual: DirectDeliveryAccrual) =
+            of(null, accrual.ticket, accrual.amount, if (accrual.isOpen) "OPEN" else "RELIEVED", accrual.lines)
 
-        fun from(credit: VendorCredit) = of(credit.id.toString(), credit.ticket, credit.amount, credit.lines)
+        fun from(credit: VendorCredit) =
+            of(credit.id.toString(), credit.ticket, credit.amount, credit.status.code, credit.lines)
 
         private fun of(
             id: String?,
             ticket: DeliveredTicket,
             amount: Money,
+            status: String,
             lines: List<TicketAmountLine>,
         ) = TicketAmountResponse(
             id = id,
@@ -65,6 +72,7 @@ data class TicketAmountResponse(
             ticketNumber = ticket.ticketNumber,
             receivedOn = ticket.receivedOn.value,
             amount = MoneyDto.from(amount),
+            status = status,
             lines = lines.map(TicketAmountLineResponse::from),
         )
     }

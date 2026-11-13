@@ -49,7 +49,7 @@ Master data and base pricing (Phase 1 of the PRD), and the start of procure to p
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 | `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
 | `receiving` | `expected-deliveries`, `receipts`, `direct-deliveries`, `direct-deliveries/costs` | `GoodsReceived`, `ReceiptDiscrepancyRecorded`, `DirectDeliveryReceived` |
-| `payables` | `payables/accruals`, `payables/accruals/balances`, `payables/invoices`, `payables/vouchers`, `payables/payment-runs`, `payables/payments`, `payables/direct-delivery-accruals`, `payables/vendor-credits` | `AccrualRecorded`, `InvoiceMatched`, `InvoiceMatchException`, `PayableVoucherReleased`, `PaymentIssued` |
+| `payables` | `payables/accruals`, `payables/accruals/balances`, `payables/invoices`, `payables/vouchers`, `payables/payment-runs`, `payables/payments`, `payables/direct-delivery-accruals`, `payables/direct-delivery-invoices`, `payables/vendor-credits` | `AccrualRecorded`, `InvoiceMatched`, `InvoiceMatchException`, `DirectDeliveryInvoiceMatched`, `DirectDeliveryInvoiceMatchException`, `PayableVoucherReleased`, `PaymentIssued` |
 | `ledger` | `ledger/accounts`, `ledger/posting-accounts`, `ledger/fiscal-periods`, `ledger/journal-entries`, `ledger/trial-balance` | `JournalEntryPosted` |
 | `inventory` | `inventory/adjustments`, `inventory/counts`, `inventory/on-hand`, `inventory/movements` | `InventoryAdjusted` |
 
@@ -66,7 +66,7 @@ Inventory is an append-only ledger of movements per item and location, warehouse
 
 Receiving expects every purchase order that purchasing sends. A clerk checks a delivery in against the order's lines; cases over, short, and damaged are recorded on the receipt and published as a discrepancy.
 
-Vendors that deliver straight to stores have no purchase order. A buyer agrees a cost per unit with the vendor for each store; that cost list is also what allows the vendor to deliver an item there. A store manager checks in the driver's ticket in single units, with what was delivered and what was taken back. Delivered units enter the store's stock and are accrued; returned units leave it and become a vendor credit; see [ADR 5](docs/adr/0005-direct-store-delivery-receipts.md). Matching the vendor's invoice to the ticket is not built yet.
+Vendors that deliver straight to stores have no purchase order. A buyer agrees a cost per unit with the vendor for each store; that cost list is also what allows the vendor to deliver an item there. A store manager checks in the driver's ticket in single units, with what was delivered and what was taken back. Delivered units enter the store's stock and are accrued; returned units leave it and become a vendor credit; see [ADR 5](docs/adr/0005-direct-store-delivery-receipts.md). The vendor sends one invoice per ticket, which is matched two ways: it must bill exactly the items and units the store received, at a unit cost within tolerance of the agreed cost. A buyer who may approve, and did not enter the invoice, can override a price exception. A match releases a voucher, and a payment run deducts the vendor's open credits from what it pays; see [ADR 6](docs/adr/0006-direct-delivery-invoices-and-vendor-credits.md).
 
 Payables accrues what is owed for each receipt at purchase order cost (goods received, not invoiced) from `GoodsReceived`, and reports the open balance and its age by vendor.
 

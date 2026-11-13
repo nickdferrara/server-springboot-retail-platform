@@ -7,6 +7,7 @@ import com.retailplatform.payables.application.PaymentRunDetail
 import com.retailplatform.payables.application.ProposePaymentRun
 import com.retailplatform.payables.domain.Payment
 import com.retailplatform.payables.domain.PaymentRun
+import com.retailplatform.payables.domain.PaymentRunCredit
 import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.PaymentRunLine
 import com.retailplatform.payables.domain.PaymentRunStatus
@@ -65,6 +66,23 @@ data class PaidVoucherResponse(
     }
 }
 
+data class DeductedCreditResponse(
+    val creditId: String,
+    val vendorId: String,
+    val ticketNumber: String,
+    val amount: MoneyDto,
+) {
+    companion object {
+        fun from(credit: PaymentRunCredit) =
+            DeductedCreditResponse(
+                creditId = credit.creditId.toString(),
+                vendorId = credit.vendorId.toString(),
+                ticketNumber = credit.ticketNumber,
+                amount = MoneyDto.from(credit.amount),
+            )
+    }
+}
+
 data class PaymentResponse(
     val id: String,
     val number: String,
@@ -73,8 +91,10 @@ data class PaymentResponse(
     val paidOn: LocalDate,
     val gross: MoneyDto,
     val discount: MoneyDto,
+    val credit: MoneyDto,
     val net: MoneyDto,
     val vouchers: List<PaidVoucherResponse>,
+    val credits: List<DeductedCreditResponse>,
 ) {
     companion object {
         fun from(payment: Payment) =
@@ -86,8 +106,10 @@ data class PaymentResponse(
                 paidOn = payment.paidOn.value,
                 gross = MoneyDto.from(payment.gross),
                 discount = MoneyDto.from(payment.discount),
+                credit = MoneyDto.from(payment.credit),
                 net = MoneyDto.from(payment.net),
                 vouchers = payment.vouchers.map(PaidVoucherResponse::from),
+                credits = payment.credits.map(DeductedCreditResponse::from),
             )
     }
 }
@@ -101,6 +123,7 @@ data class PaymentRunResponse(
     val decidedBy: String?,
     val decidedOn: LocalDate?,
     val lines: List<PaidVoucherResponse>,
+    val credits: List<DeductedCreditResponse>,
     val payments: List<PaymentResponse>,
 ) {
     companion object {
@@ -132,6 +155,7 @@ data class PaymentRunResponse(
                         PaymentRunStatus.Proposed -> null
                     },
                 lines = run.lines.map(PaidVoucherResponse::from),
+                credits = run.credits.map(DeductedCreditResponse::from),
                 payments = payments.map(PaymentResponse::from),
             )
         }

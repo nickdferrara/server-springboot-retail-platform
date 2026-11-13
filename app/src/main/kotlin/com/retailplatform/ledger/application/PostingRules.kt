@@ -4,6 +4,7 @@ import com.retailplatform.ledger.domain.EntrySide
 import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
+import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
@@ -98,8 +99,8 @@ class InvoiceMatchedPostingRule : PostingRule<InvoiceMatched> {
 }
 
 /**
- * Vendor payment issued: debit accounts payable for what the vouchers owed, credit the bank for what was paid,
- * and credit purchase discounts taken for the early-payment discount.
+ * Vendor payment issued: debit accounts payable for what the vouchers owed less the vendor credits deducted,
+ * credit the bank for what was paid, and credit purchase discounts taken for the early-payment discount.
  */
 @Component
 class PaymentIssuedPostingRule : PostingRule<PaymentIssued> {
@@ -107,7 +108,12 @@ class PaymentIssuedPostingRule : PostingRule<PaymentIssued> {
         val currency = Currency.getInstance(event.currency)
         val lines =
             listOf(
-                PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.DEBIT, Money.of(event.grossAmount, currency)),
+                // A vendor credit already reduced accounts payable when it was recorded, so only the rest is cleared.
+                PostingLine(
+                    PostingAccount.ACCOUNTS_PAYABLE,
+                    EntrySide.DEBIT,
+                    Money.of(event.grossAmount - event.creditAmount, currency),
+                ),
                 PostingLine(PostingAccount.BANK, EntrySide.CREDIT, Money.of(event.netAmount, currency)),
                 PostingLine(
                     PostingAccount.PURCHASE_DISCOUNTS_TAKEN,
@@ -158,6 +164,39 @@ class DirectDeliveryReceivedPostingRule : PostingRule<DirectDeliveryReceived> {
             businessDate = event.businessDate,
             source = EntrySource("receiving", event.eventId, "Receipt ${delivery.receiptNumber}"),
             description = "Direct store delivery on ticket ${delivery.ticketNumber}",
+            lines = lines,
+        )
+    }
+}
+
+/**
+ * Direct store delivery invoice matched: debit accrued direct delivery payables for what was accrued, credit
+ * accounts payable for what the vendor billed, and put the difference to purchase price variance.
+ */
+@Component
+class DirectDeliveryInvoiceMatchedPostingRule : PostingRule<DirectDeliveryInvoiceMatched> {
+    override fun posting(event: DirectDeliveryInvoiceMatched): Posting? {
+        val currency = Currency.getInstance(event.currency)
+        val billed = Money.of(event.invoiceAmount, currency)
+        val accrued = Money.of(event.accruedAmount, currency)
+        val variance = billed - accrued
+        val lines =
+            listOf(
+                PostingLine(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, accrued),
+                PostingLine(
+                    PostingAccount.PURCHASE_PRICE_VARIANCE,
+                    if (variance.isNegative) EntrySide.CREDIT else EntrySide.DEBIT,
+                    if (variance.isNegative) -variance else variance,
+                ),
+                PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, billed),
+            ).filterNot { it.amount.isZero }
+        if (lines.isEmpty()) return null
+
+        return Posting(
+            journal = Journal.PURCHASES,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Invoice ${event.invoice.vendorInvoiceNumber}"),
+            description = "Direct delivery invoice ${event.invoice.vendorInvoiceNumber} matched",
             lines = lines,
         )
     }

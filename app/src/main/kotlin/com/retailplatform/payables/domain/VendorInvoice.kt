@@ -215,6 +215,22 @@ class VendorInvoice private constructor(
         if (override?.approvedBy == enteredBy) throw OverrideByInvoiceCreator(details.number)
     }
 
+    /**
+     * The invoice as a voucher needs it.
+     *
+     * @throws IllegalStateException unless the invoice has matched.
+     */
+    fun matched(): MatchedInvoice {
+        val matched = status
+        check(matched is InvoiceStatus.Matched) { "Invoice ${details.number} has not matched" }
+        return MatchedInvoice(
+            VoucheredInvoice(id, details.number, details.vendorId, details.purchaseOrderId, details.invoiceDate),
+            amount,
+            matched.matchedOn,
+            matched.override?.approvedBy,
+        )
+    }
+
     private fun facts() = InvoiceFacts(id, details.number.value, details.vendorId, details.purchaseOrderId)
 
     companion object {
@@ -274,7 +290,7 @@ class InvoiceLineRepeated(
     number: VendorInvoiceNumber,
 ) : BusinessRuleViolation(
         "payables.invoice-line-repeated",
-        "Invoice $number bills the same purchase order line more than once",
+        "Invoice $number bills the same line or item more than once",
     )
 
 class InvoiceInMixedCurrencies :

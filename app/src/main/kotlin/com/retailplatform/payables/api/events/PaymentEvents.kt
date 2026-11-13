@@ -39,7 +39,8 @@ data class PaidVoucherFacts(
 
 /**
  * A payment to a vendor was issued. [grossAmount] is what the vouchers owed, [discountAmount] the early-payment
- * discounts taken, and [netAmount] what leaves the bank: gross less discount. [businessDate] is the payment date.
+ * discounts taken, [creditAmount] the vendor credits deducted, and [netAmount] what leaves the bank: gross less
+ * discount and credit. [businessDate] is the payment date.
  */
 data class PaymentIssued(
     val eventId: EventId,
@@ -53,5 +54,6 @@ data class PaymentIssued(
     val netAmount: BigDecimal,
     val currency: String,
     val vouchers: List<PaidVoucherFacts>,
+    val creditAmount: BigDecimal = BigDecimal.ZERO,
     val schemaVersion: Int = 1,
 )

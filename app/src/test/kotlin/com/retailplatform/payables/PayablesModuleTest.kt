@@ -2,6 +2,8 @@ package com.retailplatform.payables
 
 import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.payables.api.events.AccrualRecorded
+import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatchException
+import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceMatchException
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PayableVoucherReleased
@@ -9,9 +11,12 @@ import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.payables.application.AccrualQueries
 import com.retailplatform.payables.application.ApprovePaymentRun
 import com.retailplatform.payables.application.CancelPaymentRun
+import com.retailplatform.payables.application.DirectDeliveryInvoiceQueries
 import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
+import com.retailplatform.payables.application.EnterDirectDeliveryInvoice
 import com.retailplatform.payables.application.EnterVendorInvoice
 import com.retailplatform.payables.application.InvoiceQueries
+import com.retailplatform.payables.application.OverrideDirectDeliveryException
 import com.retailplatform.payables.application.OverrideMatchException
 import com.retailplatform.payables.application.PaymentQueries
 import com.retailplatform.payables.application.ProposePaymentRun
@@ -19,11 +24,14 @@ import com.retailplatform.payables.application.RecordAccrual
 import com.retailplatform.payables.application.RecordAccrualCommand
 import com.retailplatform.payables.application.RecordDirectDelivery
 import com.retailplatform.payables.application.RecordDirectDeliveryCommand
+import com.retailplatform.payables.application.RematchDirectDeliveryInvoice
 import com.retailplatform.payables.application.RematchVendorInvoice
 import com.retailplatform.payables.application.VendorTermsRepository
 import com.retailplatform.payables.application.VoucherQueries
 import com.retailplatform.payables.domain.AccrualLine
 import com.retailplatform.payables.domain.AccruedReceipt
+import com.retailplatform.payables.domain.BilledTicket
+import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.InvoiceAlreadyMatched
 import com.retailplatform.payables.domain.InvoiceDetails
@@ -40,6 +48,12 @@ import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.PaymentRunNotProposed
 import com.retailplatform.payables.domain.PaymentRunStatus
 import com.retailplatform.payables.domain.PaymentWindow
+import com.retailplatform.payables.domain.TicketAlreadyInvoiced
+import com.retailplatform.payables.domain.TicketAmountLine
+import com.retailplatform.payables.domain.TicketExceptionReason
+import com.retailplatform.payables.domain.TicketInvoiceDetails
+import com.retailplatform.payables.domain.TicketInvoiceStatus
+import com.retailplatform.payables.domain.VendorCreditStatus
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.payables.domain.VendorTerms
 import com.retailplatform.payables.domain.VoucherDiscount
@@ -106,8 +120,6 @@ class PayablesModuleTest(
     @Autowired private val approvePaymentRun: ApprovePaymentRun,
     @Autowired private val cancelPaymentRun: CancelPaymentRun,
     @Autowired private val payments: PaymentQueries,
-    @Autowired private val recordDirectDelivery: RecordDirectDelivery,
-    @Autowired private val directDeliveries: DirectDeliveryPayablesQueries,
     @Autowired private val clock: Clock,
 ) {
     private val today get() = BusinessDate.today(clock)
@@ -427,53 +439,6 @@ class PayablesModuleTest(
         cancelPaymentRun.handle(next)
         shouldThrow<ResourceNotFound> { cancelPaymentRun.handle(PaymentRunId.generate(clock)) }
         shouldThrow<PaymentDateInPast> { proposePaymentRun.handle(PaymentWindow.of(today.minusDays(1), today)) }
-    }
-
-    @Test
-    fun `a direct delivery is accrued for what came and credited for what the driver took back`(scenario: Scenario) {
-        val vendorId = VendorId.generate(clock)
-        val event =
-            DirectDeliveryReceived(
-                eventId = EventId.generate(clock),
-                occurredAt = clock.instant(),
-                businessDate = today,
-                delivery =
-                    DirectDeliveryFacts(
-                        DirectDeliveryId.generate(clock),
-                        "100077",
-                        vendorId,
-                        StoreId.generate(clock),
-                        "T-1",
-                    ),
-                currency = "USD",
-                lines =
-                    listOf(
-                        DirectDeliveryLine(1, ItemId.generate(clock), 20, 3, BigDecimal("1.2500")),
-                        DirectDeliveryLine(2, ItemId.generate(clock), 0, 5, BigDecimal("0.8000")),
-                    ),
-            )
-
-        scenario
-            .publish(event)
-            .andWaitForStateChange { directDeliveries.credits(vendorId, PageQuery.of()).total == 1L }
-            .andVerify { it shouldBe true }
-
-        val accrual = directDeliveries.accruals(vendorId, PageQuery.of()).items.single()
-        accrual.amount shouldBe usd("25.00")
-        accrual.ticket.ticketNumber shouldBe "T-1"
-        accrual.ticket.receivedOn shouldBe today
-        accrual.lines.single().units shouldBe 20
-        val credit = directDeliveries.credits(vendorId, PageQuery.of()).items.single()
-        credit.amount shouldBe usd("7.75")
-        credit.lines.map { it.units } shouldBe listOf(3, 5)
-        credit.ticket.deliveryId shouldBe event.delivery.deliveryId
-
-        // The same delivery arriving again accrues and credits nothing more.
-        recordDirectDelivery.handle(
-            RecordDirectDeliveryCommand(accrual.ticket, accrual.lines, credit.lines),
-        )
-        directDeliveries.accruals(vendorId, PageQuery.of()).total shouldBe 1
-        directDeliveries.credits(vendorId, PageQuery.of()).total shouldBe 1
     }
 
     @Test

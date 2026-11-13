@@ -39,13 +39,24 @@ data class VoucherDiscount(
     val goodThrough: BusinessDate,
 )
 
-/** The matched invoice a voucher pays. */
+/** The matched invoice a voucher pays. [purchaseOrderId] is `null` for a direct store delivery invoice. */
 data class VoucheredInvoice(
     val invoiceId: InvoiceId,
     val vendorInvoiceNumber: VendorInvoiceNumber,
     val vendorId: VendorId,
-    val purchaseOrderId: PurchaseOrderId,
+    val purchaseOrderId: PurchaseOrderId?,
     val invoiceDate: BusinessDate,
+)
+
+/**
+ * An invoice that matched, or whose exception was overridden, and so may be vouchered: [amount] became owed on
+ * [matchedOn]. [overrideApprovedBy] names who approved an override, and is `null` for a plain match.
+ */
+data class MatchedInvoice(
+    val invoice: VoucheredInvoice,
+    val amount: Money,
+    val matchedOn: BusinessDate,
+    val overrideApprovedBy: String?,
 )
 
 /** What a voucher is for and when it is to be paid. */
@@ -138,35 +149,26 @@ class Voucher private constructor(
 
     companion object {
         /**
-         * Releases a voucher for the matched [invoice], due and discounted as the vendor's [terms] say, and raises
+         * Releases a voucher for a [matched] invoice, due and discounted as the vendor's [terms] say, and raises
          * [PayableVoucherReleased].
          */
         fun release(
             number: VoucherNumber,
-            invoice: VendorInvoice,
+            matched: MatchedInvoice,
             terms: VendorTerms,
             clock: Clock,
         ): Voucher {
-            val matched = invoice.status
-            check(matched is InvoiceStatus.Matched) { "A voucher is released for a matched invoice" }
-            val details = invoice.details
+            val invoice = matched.invoice
             val voucher =
                 Voucher(
                     id = VoucherId.generate(clock),
                     number = number,
-                    invoice =
-                        VoucheredInvoice(
-                            invoice.id,
-                            details.number,
-                            details.vendorId,
-                            details.purchaseOrderId,
-                            details.invoiceDate,
-                        ),
+                    invoice = invoice,
                     terms =
                         VoucherTerms(
-                            invoice.amount,
-                            terms.dueOn(details.invoiceDate),
-                            terms.discountFor(details.invoiceDate),
+                            matched.amount,
+                            terms.dueOn(invoice.invoiceDate),
+                            terms.discountFor(invoice.invoiceDate),
                         ),
                     releasedOn = matched.matchedOn,
                     status = VoucherStatus.Released,
@@ -179,11 +181,17 @@ class Voucher private constructor(
                     businessDate = matched.matchedOn,
                     voucherId = voucher.id,
                     voucherNumber = number.value,
-                    invoice = InvoiceFacts(invoice.id, details.number.value, details.vendorId, details.purchaseOrderId),
+                    invoice =
+                        InvoiceFacts(
+                            invoice.invoiceId,
+                            invoice.vendorInvoiceNumber.value,
+                            invoice.vendorId,
+                            invoice.purchaseOrderId,
+                        ),
                     amount = voucher.amount.amount,
                     currency = voucher.amount.currency.currencyCode,
                     dueOn = voucher.terms.dueOn.value,
-                    overrideApprovedBy = matched.override?.approvedBy,
+                    overrideApprovedBy = matched.overrideApprovedBy,
                 ),
             )
             return voucher

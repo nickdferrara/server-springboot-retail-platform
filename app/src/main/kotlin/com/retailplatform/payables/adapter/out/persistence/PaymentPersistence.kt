@@ -4,12 +4,15 @@ import com.retailplatform.payables.application.PaymentNumbers
 import com.retailplatform.payables.application.PaymentRepository
 import com.retailplatform.payables.application.PaymentRunRepository
 import com.retailplatform.payables.domain.Payment
+import com.retailplatform.payables.domain.PaymentHeader
 import com.retailplatform.payables.domain.PaymentNumber
 import com.retailplatform.payables.domain.PaymentRun
+import com.retailplatform.payables.domain.PaymentRunCredit
 import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.PaymentRunLine
 import com.retailplatform.payables.domain.PaymentRunStatus
 import com.retailplatform.payables.domain.PaymentWindow
+import com.retailplatform.payables.domain.VendorCreditId
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.payables.domain.VoucherNumber
 import com.retailplatform.platform.persistence.AuditMetadata
@@ -48,6 +51,7 @@ data class PaymentRunEntity(
     val decidedBy: String?,
     val decidedOn: LocalDate?,
     @MappedCollection(idColumn = "payment_run_id", keyColumn = "position") val lines: List<PaymentRunLineEntity>,
+    @MappedCollection(idColumn = "payment_run_id", keyColumn = "position") val credits: List<PaymentRunCreditEntity>,
     @Version val version: Int = 0,
     @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
 )
@@ -75,6 +79,23 @@ data class PaymentRunLineEntity(
     }
 }
 
+@Table(schema = "payables", name = "payment_run_credit")
+data class PaymentRunCreditEntity(
+    val vendorCreditId: UUID,
+    val vendorId: UUID,
+    val ticketNumber: String,
+    val amount: BigDecimal,
+    val currency: String,
+) {
+    fun toDomain() =
+        PaymentRunCredit(
+            creditId = VendorCreditId.of(vendorCreditId),
+            vendorId = VendorId.of(vendorId),
+            ticketNumber = ticketNumber,
+            amount = Money.of(amount, Currency.getInstance(currency)),
+        )
+}
+
 @Table(schema = "payables", name = "payment")
 data class PaymentEntity(
     @Id val id: UUID,
@@ -84,6 +105,7 @@ data class PaymentEntity(
     val paidOn: LocalDate,
     val grossAmount: BigDecimal,
     val discount: BigDecimal,
+    val credit: BigDecimal,
     val netAmount: BigDecimal,
     val currency: String,
     @Version val version: Int = 0,
@@ -138,6 +160,16 @@ class JdbcPaymentRunRepository(
                             currency = it.amount.currency.currencyCode,
                         )
                     },
+                credits =
+                    run.credits.map {
+                        PaymentRunCreditEntity(
+                            vendorCreditId = it.creditId.value,
+                            vendorId = it.vendorId.value,
+                            ticketNumber = it.ticketNumber,
+                            amount = it.amount.amount,
+                            currency = it.amount.currency.currencyCode,
+                        )
+                    },
                 version = run.version,
                 audit = audit,
             ),
@@ -158,6 +190,7 @@ class JdbcPaymentRunRepository(
             window = PaymentWindow.of(BusinessDate(paymentDate), BusinessDate(payThrough)),
             proposedBy = proposedBy,
             lines = lines.map { it.toDomain() },
+            credits = credits.map { it.toDomain() },
             status =
                 when {
                     decidedBy == null || decidedOn == null -> PaymentRunStatus.Proposed
@@ -187,6 +220,7 @@ class JdbcPaymentRepository(
                 paidOn = payment.paidOn.value,
                 grossAmount = payment.gross.amount,
                 discount = payment.discount.amount,
+                credit = payment.credit.amount,
                 netAmount = payment.net.amount,
                 currency = payment.gross.currency.currencyCode,
             ),
@@ -194,30 +228,33 @@ class JdbcPaymentRepository(
     }
 
     override fun findById(id: PaymentId): Payment? =
-        payments.findById(id.value).getOrNull()?.let { it.toDomain(linesOf(it.paymentRunId)) }
+        payments.findById(id.value).getOrNull()?.let { it.toDomain(runs.findById(it.paymentRunId).orElseThrow()) }
 
     override fun findByRun(paymentRunId: PaymentRunId): List<Payment> {
-        val lines = linesOf(paymentRunId.value)
-        return payments.findByRun(paymentRunId.value).map { it.toDomain(lines) }
+        val run = runs.findById(paymentRunId.value).orElseThrow()
+        return payments.findByRun(paymentRunId.value).map { it.toDomain(run) }
     }
 
-    private fun linesOf(paymentRunId: UUID): List<PaymentRunLine> =
-        runs
-            .findById(paymentRunId)
-            .orElseThrow()
-            .lines
-            .map { it.toDomain() }
-
-    /** A payment settles its run's lines for its vendor in its currency. */
-    private fun PaymentEntity.toDomain(runLines: List<PaymentRunLine>): Payment {
+    /** A payment settles its run's vouchers, and deducts its run's credits, for its vendor in its currency. */
+    private fun PaymentEntity.toDomain(run: PaymentRunEntity): Payment {
         val vendor = VendorId.of(vendorId)
         return Payment.rehydrate(
             id = PaymentId.of(id),
-            number = PaymentNumber.of(number),
-            paymentRunId = PaymentRunId.of(paymentRunId),
-            vendorId = vendor,
-            paidOn = BusinessDate(paidOn),
-            vouchers = runLines.filter { it.vendorId == vendor && it.amount.currency.currencyCode == currency },
+            header =
+                PaymentHeader(
+                    PaymentNumber.of(number),
+                    PaymentRunId.of(paymentRunId),
+                    vendor,
+                    BusinessDate(paidOn),
+                ),
+            vouchers =
+                run.lines
+                    .map { it.toDomain() }
+                    .filter { it.vendorId == vendor && it.amount.currency.currencyCode == currency },
+            credits =
+                run.credits
+                    .map { it.toDomain() }
+                    .filter { it.vendorId == vendor && it.amount.currency.currencyCode == currency },
         )
     }
 }

@@ -1,7 +1,7 @@
 package com.retailplatform.payables.application
 
+import com.retailplatform.payables.domain.MatchedInvoice
 import com.retailplatform.payables.domain.PaymentWindow
-import com.retailplatform.payables.domain.VendorInvoice
 import com.retailplatform.payables.domain.VendorTerms
 import com.retailplatform.payables.domain.Voucher
 import com.retailplatform.payables.domain.VoucherNumber
@@ -90,12 +90,12 @@ class VoucherRelease(
     private val events: ApplicationEventPublisher,
     private val clock: Clock,
 ) {
-    fun releaseFor(invoice: VendorInvoice) {
+    fun releaseFor(matched: MatchedInvoice) {
         // A vendor whose terms have not reached payables yet is paid on the configured default terms.
         val terms =
-            vendorTerms.findFor(invoice.details.vendorId, invoice.details.invoiceDate)
+            vendorTerms.findFor(matched.invoice.vendorId, matched.invoice.invoiceDate)
                 ?: VendorTerms.of(properties.defaultNetDays)
-        val voucher = Voucher.release(numbers.next(), invoice, terms, clock)
+        val voucher = Voucher.release(numbers.next(), matched, terms, clock)
         vouchers.save(voucher)
         voucher.releaseEvents().forEach(events::publishEvent)
     }

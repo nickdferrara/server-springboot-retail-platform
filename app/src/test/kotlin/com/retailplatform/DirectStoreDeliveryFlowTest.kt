@@ -70,6 +70,15 @@ class DirectStoreDeliveryFlowTest(
         }
         mockMvc.get("/api/v1/direct-deliveries?storeId=$storeId").andExpect { jsonPath("$.total") { value(1) } }
 
+        stockedAccruedAndPosted(vendorId, storeId, itemId)
+        invoiced(vendorId, storeId, itemId)
+    }
+
+    private fun stockedAccruedAndPosted(
+        vendorId: String,
+        storeId: String,
+        itemId: String,
+    ) {
         // 20 units in and 3 out leaves 17 on the shelf at 1.25.
         await().atMost(patience).untilAsserted {
             mockMvc.get("/api/v1/inventory/on-hand/$itemId?storeId=$storeId").andExpect {
@@ -98,6 +107,87 @@ class DirectStoreDeliveryFlowTest(
         }
         mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect { jsonPath("$.balanced") { value(true) } }
     }
+
+    /**
+     * The vendor bills the ticket: 20 units at 1.26 against an agreed 1.25 is within tolerance, so the invoice
+     * matches, the accrual is relieved, and a voucher for 25.20 is released. A payment run then picks up the
+     * voucher and deducts the 3.75 credit for what the driver took back.
+     */
+    private fun invoiced(
+        vendorId: String,
+        storeId: String,
+        itemId: String,
+    ) {
+        bill(vendorId, storeId, itemId, "T-9999", "DSD-${System.nanoTime()}").andExpect {
+            status { isCreated() }
+            jsonPath("$.status") { value("EXCEPTION") }
+            jsonPath("$.exceptions[0].reason") { value("TICKET_NOT_RECEIVED") }
+        }
+        mockMvc.get("/api/v1/payables/direct-delivery-invoices?exceptionsOnly=true").andExpect {
+            jsonPath("$.items[0].ticketNumber") { value("T-9999") }
+        }
+
+        val invoice = created(bill(vendorId, storeId, itemId, "T-5001", "DSD-${System.nanoTime()}"))
+        mockMvc.get(invoice).andExpect {
+            status { isOk() }
+            jsonPath("$.status") { value("MATCHED") }
+            jsonPath("$.amount.amount") { value(25.2) }
+        }
+        post("$invoice/override", """{"reason": "Already matched"}""").andExpect {
+            status { isUnprocessableContent() }
+            jsonPath("$.code") { value("payables.invoice-already-matched") }
+        }
+        mockMvc.get("/api/v1/payables/direct-delivery-accruals?vendorId=$vendorId").andExpect {
+            jsonPath("$.items[0].status") { value("RELIEVED") }
+        }
+        mockMvc.get("/api/v1/payables/vouchers?vendorId=$vendorId").andExpect {
+            jsonPath("$.total") { value(1) }
+            jsonPath("$.items[0].amount.amount") { value(25.2) }
+        }
+        await().atMost(patience).untilAsserted {
+            mockMvc.get("/api/v1/ledger/journal-entries?size=200").andExpect {
+                jsonPath("$.items[?(@.journal == 'PURCHASES' && @.amount.amount == 25.2)].sourceModule") {
+                    value("payables")
+                }
+            }
+        }
+
+        val run =
+            created(
+                post(
+                    "/api/v1/payables/payment-runs",
+                    """{"paymentDate": "$today", "payThrough": "${today.plusDays(400)}"}""",
+                ),
+            )
+        mockMvc.get(run).andExpect {
+            jsonPath("$.lines[?(@.vendorId == '$vendorId')].amount.amount") { value(25.2) }
+            jsonPath("$.credits[?(@.vendorId == '$vendorId')].amount.amount") { value(3.75) }
+        }
+        mockMvc.get("/api/v1/payables/vendor-credits?vendorId=$vendorId").andExpect {
+            jsonPath("$.items[0].status") { value("SCHEDULED") }
+        }
+        // With sign-in off the proposer cannot approve the run, so it is cancelled and the credit is open again.
+        post("$run/cancel", "").andExpect { status { isOk() } }
+        mockMvc.get("/api/v1/payables/vendor-credits?vendorId=$vendorId").andExpect {
+            jsonPath("$.items[0].status") { value("OPEN") }
+        }
+    }
+
+    private fun bill(
+        vendorId: String,
+        storeId: String,
+        itemId: String,
+        ticket: String,
+        number: String,
+    ): ResultActionsDsl =
+        post(
+            "/api/v1/payables/direct-delivery-invoices",
+            """
+            {"vendorId": "$vendorId", "storeId": "$storeId", "ticketNumber": "$ticket",
+             "vendorInvoiceNumber": "$number", "invoiceDate": "$today",
+             "lines": [{"itemId": "$itemId", "units": 20, "unitCost": {"amount": 1.26, "currency": "USD"}}]}
+            """.trimIndent(),
+        )
 
     private fun agree(
         vendorId: String,
