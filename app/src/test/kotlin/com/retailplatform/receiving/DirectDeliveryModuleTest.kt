@@ -3,13 +3,19 @@ package com.retailplatform.receiving
 import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.locations.api.StoreDirectory
 import com.retailplatform.platform.security.Roles
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrected
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
+import com.retailplatform.receiving.application.CorrectDirectDelivery
+import com.retailplatform.receiving.application.CorrectDirectDeliveryCommand
 import com.retailplatform.receiving.application.DirectDeliveryQueries
 import com.retailplatform.receiving.application.ReceiveDirectDelivery
 import com.retailplatform.receiving.application.ReceiveDirectDeliveryCommand
 import com.retailplatform.receiving.application.SetAgreedCost
 import com.retailplatform.receiving.application.SetAgreedCostCommand
 import com.retailplatform.receiving.domain.AgreedCostEffectiveInPast
+import com.retailplatform.receiving.domain.CorrectedCount
+import com.retailplatform.receiving.domain.CorrectionChangesNothing
+import com.retailplatform.receiving.domain.CorrectionReason
 import com.retailplatform.receiving.domain.DeliveryTicket
 import com.retailplatform.receiving.domain.DeliveryTicketAlreadyReceived
 import com.retailplatform.receiving.domain.DeliveryTicketNumber
@@ -73,6 +79,7 @@ class KnownStoresAndVendors {
 class DirectDeliveryModuleTest(
     @Autowired private val setAgreedCost: SetAgreedCost,
     @Autowired private val receiveDirectDelivery: ReceiveDirectDelivery,
+    @Autowired private val correctDirectDelivery: CorrectDirectDelivery,
     @Autowired private val queries: DirectDeliveryQueries,
     @Autowired private val clock: Clock,
 ) {
@@ -115,21 +122,97 @@ class DirectDeliveryModuleTest(
                 event.lines.map { it.unitsDelivered to it.unitsReturned } shouldBe listOf(20 to 3, 0 to 5)
             }
 
-        val delivery = queries.delivery(requireNotNull(id))
+        val delivery = queries.delivery(requireNotNull(id)).delivery
         delivery.receivedBy shouldBe "manager"
         delivery.receivedOn shouldBe today
         delivery.deliveredCost shouldBe usd("25.00")
         delivery.returnedCost shouldBe usd("7.75")
         delivery.lines.map { it.lineNumber } shouldBe listOf(1, 2)
-        queries.deliveriesTo(mainStreet, PageQuery.of()).items.map { it.id } shouldBe listOf(delivery.id)
+        queries.deliveriesTo(mainStreet, PageQuery.of()).items.map { it.delivery.id } shouldBe listOf(delivery.id)
 
         // The same ticket number is a different delivery at another store, at that store's cost.
         val other = receiveDirectDelivery.handle(command(lakeside, "T-1001", TicketLine.of(cola, 10)))
-        queries.delivery(other).deliveredCost shouldBe usd("14.00")
+        queries.delivery(other).delivery.deliveredCost shouldBe usd("14.00")
         shouldThrow<DeliveryTicketAlreadyReceived> {
             receiveDirectDelivery.handle(command(mainStreet, "T-1001", TicketLine.of(cola, 1)))
         }
         shouldThrow<ResourceNotFound> { queries.delivery(DirectDeliveryId.generate(clock)) }
+    }
+
+    @Test
+    fun `a correction says what each item should read and announces the change`(scenario: Scenario) {
+        agree(cola, "1.25", listOf(mainStreet))
+        agree(chips, "0.80", listOf(mainStreet))
+        val id = receiveDirectDelivery.handle(command(mainStreet, "T-4001", TicketLine.of(cola, 22, 3)))
+        // A cost agreed after the delivery does not reprice it.
+        agree(cola, "1.50", listOf(mainStreet))
+
+        scenario
+            .stimulate(
+                Runnable {
+                    correctDirectDelivery.handle(
+                        CorrectDirectDeliveryCommand(
+                            id,
+                            CorrectionReason.of("Miscounted; chips were missed"),
+                            listOf(CorrectedCount.of(cola, 20, 3), CorrectedCount.of(chips, 10)),
+                        ),
+                    )
+                },
+            ).andWaitForEventOfType(DirectDeliveryCorrected::class.java)
+            .matching { it.delivery.deliveryId == id }
+            .toArriveAndVerify { event ->
+                event.reason shouldBe "Miscounted; chips were missed"
+                event.lines.map { it.unitsDeliveredChange to it.unitsReturnedChange } shouldBe listOf(-2 to 0, 10 to 0)
+                event.lines.map { it.unitCost } shouldBe listOf(BigDecimal("1.2500"), BigDecimal("0.8000"))
+                event.delivery.ticketNumber shouldBe "T-4001"
+            }
+
+        val corrected = queries.delivery(id)
+        corrected.corrections.single().correctedBy shouldBe "manager"
+        corrected.delivery.currentLines(corrected.corrections).map { it.unitsDelivered } shouldBe listOf(20, 10)
+        // A second correction starts from the corrected counts.
+        val again =
+            correctDirectDelivery.handle(
+                CorrectDirectDeliveryCommand(
+                    id,
+                    CorrectionReason.of("Two more found"),
+                    listOf(CorrectedCount.of(cola, 22, 3)),
+                ),
+            )
+        again.lines.single().unitsDeliveredChange shouldBe 2
+        queries
+            .delivery(id)
+            .corrections
+            .map { it.receiptNumber }
+            .distinct()
+            .size shouldBe 2
+    }
+
+    @Test
+    fun `a correction changes something, is for a delivery that exists, and is made by a store manager`() {
+        agree(cola, "1.25", listOf(mainStreet))
+        val id = receiveDirectDelivery.handle(command(mainStreet, "T-4002", TicketLine.of(cola, 22, 3)))
+
+        shouldThrow<CorrectionChangesNothing> {
+            correctDirectDelivery.handle(
+                CorrectDirectDeliveryCommand(id, CorrectionReason.of("Same"), listOf(CorrectedCount.of(cola, 22, 3))),
+            )
+        }
+        shouldThrow<ResourceNotFound> {
+            correctDirectDelivery.handle(
+                CorrectDirectDeliveryCommand(
+                    DirectDeliveryId.generate(clock),
+                    CorrectionReason.of("Missing"),
+                    listOf(CorrectedCount.of(cola, 1)),
+                ),
+            )
+        }
+        asBuyer()
+        shouldThrow<AccessDeniedException> {
+            correctDirectDelivery.handle(
+                CorrectDirectDeliveryCommand(id, CorrectionReason.of("Not mine"), listOf(CorrectedCount.of(cola, 1))),
+            )
+        }
     }
 
     @Test

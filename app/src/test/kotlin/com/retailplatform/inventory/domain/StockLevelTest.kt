@@ -156,6 +156,33 @@ class StockLevelTest {
         unknown.averageCost shouldBe usd("1.25")
     }
 
+    @Test
+    fun `a receipt taken back out is undone at its own cost, and a return put back comes in at average`() {
+        val level = stocked(onHand = 10, averageCost = "1.00")
+        val source = MovementSource("Receipt 100010", EventId.generate(clock))
+        level.receive(each(10), usd("2.00"), today, source, clock)
+        level.averageCost shouldBe usd("1.50")
+
+        val undone = level.reverseReceipt(each(10), usd("2.00"), today, source, clock)
+
+        undone.type shouldBe MovementType.RECEIPT
+        undone.quantity shouldBe each(-10)
+        undone.unitCost shouldBe usd("2.00")
+        undone.after shouldBe StockPosition(each(10), usd("1.00"))
+
+        val putBack = level.reverseVendorReturn(each(2), usd("9.99"), today, source, clock)
+        putBack.type shouldBe MovementType.VENDOR_RETURN
+        putBack.quantity shouldBe each(2)
+        putBack.unitCost shouldBe usd("1.00")
+        level.onHand shouldBe each(12)
+
+        // Taking out more than is on hand leaves the average where it was.
+        level.reverseReceipt(each(20), usd("2.00"), today, source, clock).after shouldBe
+            StockPosition(each(-8), usd("1.00"))
+        shouldThrow<QuantityNotPositive> { level.reverseReceipt(each(0), usd("1.00"), today, source, clock) }
+        shouldThrow<QuantityNotPositive> { level.reverseVendorReturn(each(0), usd("1.00"), today, source, clock) }
+    }
+
     private fun empty() = StockLevel.empty(itemId, warehouse, UnitOfMeasure.EACH, clock)
 
     private fun stocked(

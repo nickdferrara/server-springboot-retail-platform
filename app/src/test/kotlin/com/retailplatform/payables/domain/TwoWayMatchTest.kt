@@ -17,6 +17,7 @@ import java.math.BigDecimal
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
+import java.util.Currency
 
 class TwoWayMatchTest {
     private val clock = Clock.fixed(Instant.parse("2026-11-13T15:00:00Z"), ZoneOffset.UTC)
@@ -111,6 +112,29 @@ class TwoWayMatchTest {
     }
 
     @Test
+    fun `an open accrual and an unused credit follow a correction to the receipt`() {
+        val accrual = accrual(line(cola, 22, "1.25"))
+
+        accrual.correct(listOf(TicketUnitChange(cola, -2, usd("1.25")), TicketUnitChange(chips, 10, usd("0.80"))))
+
+        accrual.lines.map { it.itemId to it.units } shouldBe listOf(cola to 20, chips to 10)
+        accrual.amount shouldBe usd("33.00")
+        accrual.correct(listOf(TicketUnitChange(cola, -20, usd("1.25")), TicketUnitChange(chips, -10, usd("0.80"))))
+        accrual.lines shouldBe emptyList()
+        accrual.amount shouldBe usd("0.00")
+        shouldThrow<IllegalStateException> { accrual.correct(listOf(TicketUnitChange(cola, -1, usd("1.25")))) }
+        accrual.relieve(today)
+        shouldThrow<IllegalStateException> { accrual.correct(listOf(TicketUnitChange(cola, 1, usd("1.25")))) }
+
+        val credit = VendorCredit.record(accrual.ticket, listOf(line(cola, 3, "1.25")), clock)
+        credit.canAbsorb(listOf(TicketUnitChange(cola, -4, usd("1.25")))) shouldBe false
+        credit.correct(listOf(TicketUnitChange(cola, -1, usd("1.25"))))
+        credit.amount shouldBe usd("2.50")
+        shouldThrow<IllegalStateException> { credit.correct(listOf(TicketUnitChange(cola, -3, usd("1.25")))) }
+        TicketUnitChange(cola, -2, usd("1.25")).amount shouldBe usd("-2.50")
+    }
+
+    @Test
     fun `an invoice bills each item once, in one currency`() {
         shouldThrow<InvoiceLineRepeated> { invoice(line(cola, 1, "1.00"), line(cola, 2, "1.00")) }
         shouldThrow<InvoiceInMixedCurrencies> {
@@ -138,6 +162,7 @@ class TwoWayMatchTest {
                 ticket.ticketNumber,
                 today.minusDays(2),
             ),
+            Currency.getInstance("USD"),
             lines.toList(),
         )
 

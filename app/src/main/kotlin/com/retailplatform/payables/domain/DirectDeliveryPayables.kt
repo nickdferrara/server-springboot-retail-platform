@@ -10,6 +10,7 @@ import com.retailplatform.shared.TypedId
 import com.retailplatform.shared.TypedIdFactory
 import com.retailplatform.shared.VendorId
 import java.time.Clock
+import java.util.Currency
 import java.util.UUID
 
 /** Identifies a vendor credit. */
@@ -55,21 +56,51 @@ data class TicketAmountLine private constructor(
     }
 }
 
+/** How a correction changed the units of one item on a ticket: positive for more, negative for fewer. */
+data class TicketUnitChange(
+    val itemId: ItemId,
+    val unitsChange: Int,
+    val unitCost: Money,
+) {
+    /** The value of the change at the ticket's cost; negative for fewer units. */
+    val amount: Money get() = unitCost * unitsChange
+}
+
+/** These lines once [changes] are applied; an item left with no units drops out. */
+private fun List<TicketAmountLine>.changedBy(changes: List<TicketUnitChange>): List<TicketAmountLine> {
+    val units = associate { it.itemId to it.units }.toMutableMap()
+    val costs = associate { it.itemId to it.unitCost }.toMutableMap()
+    changes.forEach { change ->
+        val after = (units[change.itemId] ?: 0) + change.unitsChange
+        check(after >= 0) { "Item ${change.itemId} cannot be left with $after units" }
+        units[change.itemId] = after
+        costs.putIfAbsent(change.itemId, change.unitCost)
+    }
+    return units.filterValues { it > 0 }.map { (itemId, left) ->
+        TicketAmountLine.of(itemId, left, costs.getValue(itemId))
+    }
+}
+
 /**
  * What is owed to a vendor for the units it delivered straight to a store on one ticket, at agreed cost, until
- * the vendor's invoice for that ticket is matched.
+ * the vendor's invoice for that ticket is matched. Every delivery has one, with no lines if nothing was
+ * delivered.
  */
 class DirectDeliveryAccrual private constructor(
     val ticket: DeliveredTicket,
-    val lines: List<TicketAmountLine>,
+    val currency: Currency,
+    lines: List<TicketAmountLine>,
     relievedOn: BusinessDate?,
     val version: Int,
 ) {
+    var lines: List<TicketAmountLine> = lines
+        private set
+
     /** The day the vendor's invoice matched and the amount moved to accounts payable; `null` while it waits. */
     var relievedOn: BusinessDate? = relievedOn
         private set
 
-    val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
+    val amount: Money get() = lines.map { it.amount }.fold(Money.zero(currency), Money::plus)
 
     /** Whether the accrual still waits for the vendor's invoice. */
     val isOpen: Boolean get() = relievedOn == null
@@ -80,23 +111,28 @@ class DirectDeliveryAccrual private constructor(
         relievedOn = on
     }
 
+    /** Brings an accrual that still waits for its invoice in line with a correction to the store's receipt. */
+    fun correct(changes: List<TicketUnitChange>) {
+        check(isOpen) { "The accrual for ticket ${ticket.ticketNumber} was already relieved" }
+        lines = lines.changedBy(changes)
+    }
+
     companion object {
-        /** Accrues the delivered [lines] of [ticket]. */
+        /** Accrues the delivered [lines] of [ticket]; none if the ticket only took product back. */
         fun record(
             ticket: DeliveredTicket,
+            currency: Currency,
             lines: List<TicketAmountLine>,
-        ): DirectDeliveryAccrual {
-            require(lines.isNotEmpty()) { "An accrual has at least one line" }
-            return DirectDeliveryAccrual(ticket, lines, relievedOn = null, version = 0)
-        }
+        ): DirectDeliveryAccrual = DirectDeliveryAccrual(ticket, currency, lines, relievedOn = null, version = 0)
 
         /** Rebuilds an accrual from stored state. */
         fun rehydrate(
             ticket: DeliveredTicket,
+            currency: Currency,
             lines: List<TicketAmountLine>,
             relievedOn: BusinessDate?,
             version: Int,
-        ): DirectDeliveryAccrual = DirectDeliveryAccrual(ticket, lines, relievedOn, version)
+        ): DirectDeliveryAccrual = DirectDeliveryAccrual(ticket, currency, lines, relievedOn, version)
     }
 }
 
@@ -134,14 +170,29 @@ sealed interface VendorCreditStatus {
 class VendorCredit private constructor(
     val id: VendorCreditId,
     val ticket: DeliveredTicket,
-    val lines: List<TicketAmountLine>,
+    val currency: Currency,
+    lines: List<TicketAmountLine>,
     status: VendorCreditStatus,
     val version: Int,
 ) {
+    var lines: List<TicketAmountLine> = lines
+        private set
     var status: VendorCreditStatus = status
         private set
 
-    val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
+    val amount: Money get() = lines.map { it.amount }.fold(Money.zero(currency), Money::plus)
+
+    /** Whether the credit is open and holds at least the units [changes] would take away from it. */
+    fun canAbsorb(changes: List<TicketUnitChange>): Boolean {
+        val units = lines.associate { it.itemId to it.units }
+        return isOpen && changes.all { (units[it.itemId] ?: 0) + it.unitsChange >= 0 }
+    }
+
+    /** Brings a credit that has not been used in line with a correction to the store's receipt. */
+    fun correct(changes: List<TicketUnitChange>) {
+        check(canAbsorb(changes)) { "Credit $id cannot take this correction" }
+        lines = lines.changedBy(changes)
+    }
 
     val isOpen: Boolean get() = status == VendorCreditStatus.Open
 
@@ -175,16 +226,48 @@ class VendorCredit private constructor(
             clock: Clock,
         ): VendorCredit {
             require(lines.isNotEmpty()) { "A credit has at least one line" }
-            return VendorCredit(VendorCreditId.generate(clock), ticket, lines, VendorCreditStatus.Open, version = 0)
+            val currency = lines.first().unitCost.currency
+            return VendorCredit(VendorCreditId.generate(clock), ticket, currency, lines, VendorCreditStatus.Open, 0)
         }
 
         /** Rebuilds a credit from stored state. */
         fun rehydrate(
             id: VendorCreditId,
             ticket: DeliveredTicket,
+            currency: Currency,
             lines: List<TicketAmountLine>,
             status: VendorCreditStatus,
             version: Int,
-        ): VendorCredit = VendorCredit(id, ticket, lines, status, version)
+        ): VendorCredit = VendorCredit(id, ticket, currency, lines, status, version)
     }
 }
+
+/** Identifies an adjustment that accounting has to look at. */
+@JvmInline
+value class DeliveryAdjustmentId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<DeliveryAdjustmentId>(::DeliveryAdjustmentId)
+}
+
+/** Why a correction left an amount that nothing settles by itself. */
+enum class DeliveryAdjustmentKind {
+    /** More was received than first recorded, after the vendor's invoice for the ticket had already matched. */
+    RECEIVED_AFTER_INVOICE,
+
+    /** Fewer units were returned than first recorded, after the credit for them had been used. */
+    RETURN_REVERSED_AFTER_CREDIT_USED,
+}
+
+/**
+ * An amount owed to a vendor that a late correction to a store's receipt brought to light. It is accrued, but no
+ * invoice will match it and no payment run will pay it: accounting settles it with the vendor.
+ */
+data class DeliveryAdjustment(
+    val id: DeliveryAdjustmentId,
+    val ticket: DeliveredTicket,
+    val kind: DeliveryAdjustmentKind,
+    val amount: Money,
+)

@@ -76,6 +76,12 @@ interface DirectDeliveryInvoiceJdbcRepository :
         ticketNumber: String,
     ): Boolean
 
+    fun findByVendorIdAndStoreIdAndTicketNumber(
+        vendorId: UUID,
+        storeId: UUID,
+        ticketNumber: String,
+    ): DirectDeliveryInvoiceEntity?
+
     fun existsByVendorIdAndVendorInvoiceNumber(
         vendorId: UUID,
         vendorInvoiceNumber: String,
@@ -131,6 +137,11 @@ class JdbcDirectDeliveryInvoiceRepository(
             ticket.storeId.value,
             ticket.ticketNumber,
         )
+
+    override fun findFor(ticket: BilledTicket): DirectDeliveryInvoice? =
+        invoices
+            .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
+            ?.toDomain()
 
     override fun exists(
         vendorId: VendorId,

@@ -6,6 +6,9 @@ import com.retailplatform.platform.security.RequiresRole
 import com.retailplatform.platform.security.Roles
 import com.retailplatform.receiving.domain.AgreedCost
 import com.retailplatform.receiving.domain.AgreedCostEffectiveInPast
+import com.retailplatform.receiving.domain.CorrectedCount
+import com.retailplatform.receiving.domain.CorrectionReason
+import com.retailplatform.receiving.domain.DeliveryCorrection
 import com.retailplatform.receiving.domain.DeliveryTicket
 import com.retailplatform.receiving.domain.DeliveryTicketAlreadyReceived
 import com.retailplatform.receiving.domain.DirectDelivery
@@ -50,6 +53,17 @@ interface DirectDeliveryRepository {
     fun findById(id: DirectDeliveryId): DirectDelivery?
 
     fun exists(ticket: DeliveryTicket): Boolean
+
+    /**
+     * The delivery [id], with its row locked until the transaction ends, so two corrections made at once are
+     * applied one after the other.
+     */
+    fun findForCorrection(id: DirectDeliveryId): DirectDelivery?
+
+    fun addCorrection(correction: DeliveryCorrection)
+
+    /** The corrections to a delivery, oldest first. */
+    fun findCorrections(id: DirectDeliveryId): List<DeliveryCorrection>
 
     /** A store's deliveries with the newest first. */
     fun findByStore(
@@ -138,6 +152,57 @@ class ReceiveDirectDelivery(
     }
 }
 
+data class CorrectDirectDeliveryCommand(
+    val deliveryId: DirectDeliveryId,
+    val reason: CorrectionReason,
+    val counts: List<CorrectedCount>,
+)
+
+/**
+ * Use case: correct a direct delivery that was checked in wrongly, by saying what each affected item should
+ * read. An item that was missed is added at the cost agreed on the day of the delivery.
+ */
+@Service
+class CorrectDirectDelivery(
+    private val deliveries: DirectDeliveryRepository,
+    private val costs: AgreedCostRepository,
+    private val numbers: ReceiptNumbers,
+    private val currentUser: CurrentUser,
+    private val events: ApplicationEventPublisher,
+    private val clock: Clock,
+) {
+    @RequiresRole(Roles.STORE_MANAGER)
+    @Transactional
+    fun handle(command: CorrectDirectDeliveryCommand): DeliveryCorrection {
+        val delivery =
+            deliveries.findForCorrection(command.deliveryId)
+                ?: throw ResourceNotFound("Direct delivery", command.deliveryId.toString())
+        val ticket = delivery.ticket
+        val agreed =
+            costs
+                .findEffective(ticket.vendorId, ticket.storeId, delivery.receivedOn)
+                .associate { it.itemId to it.unitCost }
+        val correction =
+            delivery.correct(
+                ReceiptHeader(numbers.next(), currentUser.name),
+                command.reason,
+                command.counts,
+                deliveries.findCorrections(delivery.id),
+                agreed,
+                clock,
+            )
+        deliveries.addCorrection(correction)
+        delivery.releaseEvents().forEach(events::publishEvent)
+        return correction
+    }
+}
+
+/** A delivery with the corrections made to it. */
+data class CorrectedDelivery(
+    val delivery: DirectDelivery,
+    val corrections: List<DeliveryCorrection>,
+)
+
 /** Queries: direct store deliveries and the costs agreed for them. */
 @Service
 @Transactional(readOnly = true)
@@ -146,13 +211,16 @@ class DirectDeliveryQueries(
     private val costs: AgreedCostRepository,
     private val clock: Clock,
 ) {
-    fun delivery(id: DirectDeliveryId): DirectDelivery =
-        deliveries.findById(id) ?: throw ResourceNotFound("Direct delivery", id.toString())
+    fun delivery(id: DirectDeliveryId): CorrectedDelivery {
+        val delivery = deliveries.findById(id) ?: throw ResourceNotFound("Direct delivery", id.toString())
+        return CorrectedDelivery(delivery, deliveries.findCorrections(id))
+    }
 
     fun deliveriesTo(
         storeId: StoreId,
         query: PageQuery,
-    ): Page<DirectDelivery> = deliveries.findByStore(storeId, query)
+    ): Page<CorrectedDelivery> =
+        deliveries.findByStore(storeId, query).map { CorrectedDelivery(it, deliveries.findCorrections(it.id)) }
 
     /** What the vendor charges the store for each item on [asOf], today unless given. */
     fun agreedCosts(

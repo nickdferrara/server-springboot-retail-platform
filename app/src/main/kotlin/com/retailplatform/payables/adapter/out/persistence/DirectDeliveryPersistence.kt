@@ -1,9 +1,13 @@
 package com.retailplatform.payables.adapter.out.persistence
 
+import com.retailplatform.payables.application.DeliveryAdjustmentRepository
 import com.retailplatform.payables.application.DirectDeliveryAccrualRepository
 import com.retailplatform.payables.application.VendorCreditRepository
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
+import com.retailplatform.payables.domain.DeliveryAdjustment
+import com.retailplatform.payables.domain.DeliveryAdjustmentId
+import com.retailplatform.payables.domain.DeliveryAdjustmentKind
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
 import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.TicketAmountLine
@@ -33,6 +37,7 @@ import java.math.BigDecimal
 import java.time.LocalDate
 import java.util.Currency
 import java.util.UUID
+import kotlin.jvm.optionals.getOrNull
 
 /** One line of an accrual or credit, stored the same way in either table. */
 data class TicketAmountLineEntity(
@@ -91,7 +96,7 @@ data class VendorCreditLineEntity(
 
 interface DirectDeliveryAccrualJdbcRepository : CrudRepository<DirectDeliveryAccrualEntity, UUID> {
     @Query(
-        "SELECT * FROM payables.direct_delivery_accrual WHERE vendor_id = :vendorId " +
+        "SELECT * FROM payables.direct_delivery_accrual WHERE vendor_id = :vendorId AND amount > 0 " +
             "ORDER BY received_on, delivery_id LIMIT :limit OFFSET :offset",
     )
     fun findByVendor(
@@ -100,7 +105,8 @@ interface DirectDeliveryAccrualJdbcRepository : CrudRepository<DirectDeliveryAcc
         offset: Long,
     ): List<DirectDeliveryAccrualEntity>
 
-    fun countByVendorId(vendorId: UUID): Long
+    @Query("SELECT count(*) FROM payables.direct_delivery_accrual WHERE vendor_id = :vendorId AND amount > 0")
+    fun countByVendor(vendorId: UUID): Long
 
     fun findByVendorIdAndStoreIdAndTicketNumber(
         vendorId: UUID,
@@ -110,17 +116,21 @@ interface DirectDeliveryAccrualJdbcRepository : CrudRepository<DirectDeliveryAcc
 }
 
 interface VendorCreditJdbcRepository : CrudRepository<VendorCreditEntity, UUID> {
-    fun existsByDeliveryId(deliveryId: UUID): Boolean
+    @Query(
+        "SELECT * FROM payables.vendor_credit WHERE delivery_id = :deliveryId AND status = 'OPEN' " +
+            "ORDER BY id LIMIT 1",
+    )
+    fun findOpenByDelivery(deliveryId: UUID): VendorCreditEntity?
 
     // The row locks keep a second payment run, proposed at the same moment, from deducting the same credits.
     @Query(
-        "SELECT * FROM payables.vendor_credit WHERE status = 'OPEN' AND vendor_id IN (:vendorIds) " +
+        "SELECT * FROM payables.vendor_credit WHERE status = 'OPEN' AND amount > 0 AND vendor_id IN (:vendorIds) " +
             "ORDER BY credited_on, id FOR UPDATE",
     )
     fun findOpen(vendorIds: Collection<UUID>): List<VendorCreditEntity>
 
     @Query(
-        "SELECT * FROM payables.vendor_credit WHERE vendor_id = :vendorId " +
+        "SELECT * FROM payables.vendor_credit WHERE vendor_id = :vendorId AND amount > 0 " +
             "ORDER BY credited_on, id LIMIT :limit OFFSET :offset",
     )
     fun findByVendor(
@@ -129,7 +139,8 @@ interface VendorCreditJdbcRepository : CrudRepository<VendorCreditEntity, UUID> 
         offset: Long,
     ): List<VendorCreditEntity>
 
-    fun countByVendorId(vendorId: UUID): Long
+    @Query("SELECT count(*) FROM payables.vendor_credit WHERE vendor_id = :vendorId AND amount > 0")
+    fun countByVendor(vendorId: UUID): Long
 }
 
 internal fun List<TicketAmountLine>.toEntities() =
@@ -173,6 +184,9 @@ class JdbcDirectDeliveryAccrualRepository(
 
     override fun existsFor(deliveryId: DirectDeliveryId): Boolean = accruals.existsById(deliveryId.value)
 
+    override fun findByDelivery(deliveryId: DirectDeliveryId): DirectDeliveryAccrual? =
+        accruals.findById(deliveryId.value).getOrNull()?.toDomain()
+
     override fun findFor(ticket: BilledTicket): DirectDeliveryAccrual? =
         accruals
             .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
@@ -186,7 +200,7 @@ class JdbcDirectDeliveryAccrualRepository(
             accruals.findByVendor(vendorId.value, query.size, query.offset).map { it.toDomain() },
             query.page,
             query.size,
-            accruals.countByVendorId(vendorId.value),
+            accruals.countByVendor(vendorId.value),
         )
 
     private fun DirectDeliveryAccrualEntity.toDomain(): DirectDeliveryAccrual {
@@ -201,6 +215,7 @@ class JdbcDirectDeliveryAccrualRepository(
                     ticketNumber,
                     BusinessDate(receivedOn),
                 ),
+            currency = money,
             lines = lines.map { it.line.toDomain(money) },
             relievedOn = relievedOn?.let(::BusinessDate),
             version = version,
@@ -244,7 +259,8 @@ class JdbcVendorCreditRepository(
         )
     }
 
-    override fun existsFor(deliveryId: DirectDeliveryId): Boolean = credits.existsByDeliveryId(deliveryId.value)
+    override fun findOpenByDelivery(deliveryId: DirectDeliveryId): VendorCredit? =
+        credits.findOpenByDelivery(deliveryId.value)?.toDomain()
 
     override fun findByIds(ids: List<VendorCreditId>): List<VendorCredit> =
         credits.findAllById(ids.map { it.value }).map { it.toDomain() }
@@ -260,7 +276,7 @@ class JdbcVendorCreditRepository(
             credits.findByVendor(vendorId.value, query.size, query.offset).map { it.toDomain() },
             query.page,
             query.size,
-            credits.countByVendorId(vendorId.value),
+            credits.countByVendor(vendorId.value),
         )
 
     private fun VendorCreditEntity.toDomain(): VendorCredit {
@@ -276,6 +292,7 @@ class JdbcVendorCreditRepository(
                     ticketNumber,
                     BusinessDate(creditedOn),
                 ),
+            currency = money,
             lines = lines.map { it.line.toDomain(money) },
             status = status(),
             version = version,
@@ -300,4 +317,83 @@ class JdbcVendorCreditRepository(
                 VendorCreditStatus.Scheduled(PaymentRunId.of(paymentRunId))
             }
         }
+}
+
+@Table(schema = "payables", name = "direct_delivery_adjustment")
+data class DeliveryAdjustmentEntity(
+    @Id val id: UUID,
+    val deliveryId: UUID,
+    val receiptNumber: String,
+    val vendorId: UUID,
+    val storeId: UUID,
+    val ticketNumber: String,
+    val recordedOn: LocalDate,
+    val kind: String,
+    val amount: BigDecimal,
+    val currency: String,
+    @Version val version: Int = 0,
+    @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
+)
+
+interface DeliveryAdjustmentJdbcRepository : CrudRepository<DeliveryAdjustmentEntity, UUID> {
+    @Query(
+        "SELECT * FROM payables.direct_delivery_adjustment WHERE vendor_id = :vendorId " +
+            "ORDER BY recorded_on, id LIMIT :limit OFFSET :offset",
+    )
+    fun findByVendor(
+        vendorId: UUID,
+        limit: Int,
+        offset: Long,
+    ): List<DeliveryAdjustmentEntity>
+
+    fun countByVendorId(vendorId: UUID): Long
+}
+
+@Repository
+class JdbcDeliveryAdjustmentRepository(
+    private val adjustments: DeliveryAdjustmentJdbcRepository,
+) : DeliveryAdjustmentRepository {
+    override fun save(adjustment: DeliveryAdjustment) {
+        val ticket = adjustment.ticket
+        adjustments.save(
+            DeliveryAdjustmentEntity(
+                id = adjustment.id.value,
+                deliveryId = ticket.deliveryId.value,
+                receiptNumber = ticket.receiptNumber,
+                vendorId = ticket.vendorId.value,
+                storeId = ticket.storeId.value,
+                ticketNumber = ticket.ticketNumber,
+                recordedOn = ticket.receivedOn.value,
+                kind = adjustment.kind.name,
+                amount = adjustment.amount.amount,
+                currency = adjustment.amount.currency.currencyCode,
+            ),
+        )
+    }
+
+    override fun findByVendor(
+        vendorId: VendorId,
+        query: PageQuery,
+    ): Page<DeliveryAdjustment> =
+        Page(
+            adjustments.findByVendor(vendorId.value, query.size, query.offset).map {
+                DeliveryAdjustment(
+                    id = DeliveryAdjustmentId.of(it.id),
+                    ticket =
+                        DeliveredTicket(
+                            DirectDeliveryId.of(it.deliveryId),
+                            it.receiptNumber,
+                            VendorId.of(it.vendorId),
+                            StoreId.of(it.storeId),
+                            it.ticketNumber,
+                            BusinessDate(it.recordedOn),
+                        ),
+                    kind = DeliveryAdjustmentKind.valueOf(it.kind),
+                    amount = Money.of(it.amount, Currency.getInstance(it.currency)),
+                )
+            },
+            query.page,
+            query.size,
+            adjustments.countByVendorId(vendorId.value),
+        )
 }

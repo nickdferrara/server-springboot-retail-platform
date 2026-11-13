@@ -1,5 +1,6 @@
 package com.retailplatform.receiving.domain
 
+import com.retailplatform.receiving.api.events.DirectDeliveryCorrected
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.ItemId
@@ -68,6 +69,94 @@ class DirectDeliveryTest {
             )
         }
         shouldThrow<IllegalArgumentException> { DirectDelivery.receive(header, ticket, emptyList(), costs, clock) }
+    }
+
+    @Test
+    fun `a correction records the change from what is on record, at the ticket's cost`() {
+        val delivery = DirectDelivery.receive(header, ticket, listOf(TicketLine.of(cola, 22, 3)), costs, clock)
+        delivery.releaseEvents()
+        val second = ReceiptHeader(ReceiptNumber.of("100002"), "manager")
+
+        val correction =
+            delivery.correct(
+                second,
+                CorrectionReason.of(" Miscounted "),
+                listOf(CorrectedCount.of(cola, 20, 4), CorrectedCount.of(chips, 10)),
+                emptyList(),
+                // The cost list today says 9.99 for cola, but the ticket already carries 1.25.
+                mapOf(cola to usd("9.99"), chips to usd("0.80")),
+                clock,
+            )
+
+        correction.reason.value shouldBe "Miscounted"
+        correction.lines shouldBe
+            listOf(CorrectionLine(cola, -2, 1, usd("1.25")), CorrectionLine(chips, 10, 0, usd("0.80")))
+        val event = delivery.releaseEvents().single().shouldBeInstanceOf<DirectDeliveryCorrected>()
+        event.correctionReceiptNumber shouldBe "100002"
+        event.delivery.receiptNumber shouldBe "100001"
+        event.lines.map { it.unitsDeliveredChange } shouldBe listOf(-2, 10)
+        val current = delivery.currentLines(listOf(correction))
+        current.map { Triple(it.lineNumber, it.unitsDelivered, it.unitsReturned) } shouldBe
+            listOf(Triple(1, 20, 4), Triple(2, 10, 0))
+
+        // A later correction starts from the corrected counts, and may bring a line down to nothing.
+        val later =
+            delivery.correct(
+                second,
+                CorrectionReason.of("No chips"),
+                listOf(CorrectedCount.of(chips, 0)),
+                listOf(correction),
+                costs,
+                clock,
+            )
+        later.lines shouldBe listOf(CorrectionLine(chips, -10, 0, usd("0.80")))
+    }
+
+    @Test
+    fun `a correction changes something, leaves something, and costs every item it adds`() {
+        val delivery = DirectDelivery.receive(header, ticket, listOf(TicketLine.of(cola, 20)), costs, clock)
+        val reason = CorrectionReason.of("Recount")
+
+        shouldThrow<CorrectionChangesNothing> {
+            delivery.correct(header, reason, listOf(CorrectedCount.of(cola, 20)), emptyList(), costs, clock)
+        }
+        shouldThrow<CorrectionWouldVoidDelivery> {
+            delivery.correct(header, reason, listOf(CorrectedCount.of(cola, 0)), emptyList(), costs, clock)
+        }
+        shouldThrow<NoAgreedCost> {
+            delivery.correct(
+                header,
+                reason,
+                listOf(CorrectedCount.of(ItemId.generate(clock), 5)),
+                emptyList(),
+                costs,
+                clock,
+            )
+        }
+        shouldThrow<DeliveryItemRepeated> {
+            delivery.correct(
+                header,
+                reason,
+                listOf(CorrectedCount.of(cola, 1), CorrectedCount.of(cola, 2)),
+                emptyList(),
+                costs,
+                clock,
+            )
+        }
+        shouldThrow<DeliveryInMixedCurrencies> {
+            delivery.correct(
+                header,
+                reason,
+                listOf(CorrectedCount.of(chips, 1)),
+                emptyList(),
+                mapOf(chips to Money.of("0.80", "CAD")),
+                clock,
+            )
+        }
+        shouldThrow<IllegalArgumentException> { CorrectedCount.of(cola, -1) }
+        shouldThrow<IllegalArgumentException> { CorrectedCount.of(cola, 1, -1) }
+        shouldThrow<IllegalArgumentException> { CorrectionReason.of(" ") }
+        shouldThrow<IllegalArgumentException> { CorrectionReason.of("x".repeat(201)) }
     }
 
     @Test

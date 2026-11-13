@@ -53,3 +53,24 @@ data class DirectDeliveryInvoiceMatchException(
     val exceptions: List<DirectDeliveryExceptionFacts>,
     val schemaVersion: Int = 1,
 )
+
+/**
+ * Payables took account of a correction to a store's receipt of a direct delivery. [inventoryChange] is the
+ * change in the value of what the store holds, [accrualChange] the change in what is accrued as owed to the
+ * vendor, and [creditChange] the change in what the vendor owes as credits; each is negative for a decrease, and
+ * the inventory change is the accrual change less the credit change. [businessDate] is the day of the correction.
+ */
+data class DirectDeliveryCorrectionRecorded(
+    val eventId: EventId,
+    val occurredAt: Instant,
+    val businessDate: BusinessDate,
+    val vendorId: VendorId,
+    val storeId: StoreId,
+    val ticketNumber: String,
+    val correctionReceiptNumber: String,
+    val inventoryChange: BigDecimal,
+    val accrualChange: BigDecimal,
+    val creditChange: BigDecimal,
+    val currency: String,
+    val schemaVersion: Int = 1,
+)
