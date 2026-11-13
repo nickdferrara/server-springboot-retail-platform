@@ -135,6 +135,48 @@ class TwoWayMatchTest {
     }
 
     @Test
+    fun `a short-paid invoice pays for what was received and holds back the rest`() {
+        val accrual = accrual(line(cola, 18, "1.25"), line(chips, 10, "0.80"))
+        val extra = ItemId.generate(clock)
+        // Bills 20 colas where 18 came, 8 chips where 10 came, and an item that never came.
+        val invoice = invoice(line(cola, 20, "1.26"), line(chips, 8, "0.80"), line(extra, 5, "2.00"))
+        val approval = MatchOverride.of("manager", "Store count confirmed with the driver")
+
+        val payment = match.shortPay(invoice, accrual)
+        shouldThrow<OverrideByInvoiceCreator> { invoice.shortPay(payment, MatchOverride.of("clerk", "Mine"), clock) }
+        invoice.shortPay(payment, approval, clock)
+
+        // 18 at 1.26 and 8 at 0.80 is 29.08; the invoice bills 41.60.
+        payment shouldBe ShortPayment(usd("29.08"), usd("12.52"), usd("30.50"))
+        invoice.status shouldBe TicketInvoiceStatus.ShortPaid(today, approval, usd("12.52"))
+        val event = invoice.releaseEvents().single().shouldBeInstanceOf<DirectDeliveryInvoiceMatched>()
+        event.invoiceAmount shouldBe BigDecimal("41.6000")
+        event.deductionAmount shouldBe BigDecimal("12.5200")
+        event.accruedAmount shouldBe BigDecimal("30.5000")
+        event.costVariance shouldBe BigDecimal("-1.4200")
+        val voucher = invoice.matched()
+        voucher.amount shouldBe usd("29.08")
+        voucher.overrideApprovedBy shouldBe "manager"
+        shouldThrow<InvoiceAlreadyMatched> { invoice.shortPay(payment, approval, clock) }
+    }
+
+    @Test
+    fun `an invoice is not paid short without a receipt, over a price, or with nothing to hold back or pay`() {
+        val accrual = accrual(line(cola, 18, "1.25"))
+
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(cola, 20, "1.25")), null) }
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(cola, 20, "1.40")), accrual) }
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(cola, 18, "1.25")), accrual) }
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(cola, 15, "1.25")), accrual) }
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(chips, 5, "0.80")), accrual) }
+        shouldThrow<ShortPayNotPossible> {
+            match.shortPay(invoice(TicketAmountLine.of(cola, 20, Money.of("1.25", "CAD"))), accrual)
+        }
+        val relieved = accrual(line(cola, 18, "1.25")).also { it.relieve(today) }
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice(line(cola, 20, "1.25")), relieved) }
+    }
+
+    @Test
     fun `an invoice bills each item once, in one currency`() {
         shouldThrow<InvoiceLineRepeated> { invoice(line(cola, 1, "1.00"), line(cola, 2, "1.00")) }
         shouldThrow<InvoiceInMixedCurrencies> {

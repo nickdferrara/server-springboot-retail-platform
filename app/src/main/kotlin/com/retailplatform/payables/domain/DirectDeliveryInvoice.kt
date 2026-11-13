@@ -68,6 +68,18 @@ sealed interface TicketInvoiceStatus {
         override val code = "MATCHED"
     }
 
+    /**
+     * Paid short on [matchedOn]: the store's count stood, so only the units received are paid for and
+     * [deduction] is held back from the vendor. [approval] says who decided and why.
+     */
+    data class ShortPaid(
+        val matchedOn: BusinessDate,
+        val approval: MatchOverride,
+        val deduction: Money,
+    ) : TicketInvoiceStatus {
+        override val code = "SHORT_PAID"
+    }
+
     /** Did not agree, for [exceptions]; waiting for a buyer to resolve it. */
     data class Exception(
         val exceptions: List<TicketException>,
@@ -126,6 +138,44 @@ class TwoWayMatch(
         }
     }
 
+    /**
+     * What [invoice] is worth when the store's count stands: for each item billed, the units the store received
+     * or the units billed, whichever is fewer, at the unit cost billed.
+     *
+     * @throws ShortPayNotPossible if the ticket has no accrual waiting, a billed price is outside tolerance, or
+     * the store's count leaves nothing to hold back or nothing to pay.
+     */
+    fun shortPay(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual?,
+    ): ShortPayment {
+        val number = invoice.details.number
+        if (accrual == null || !accrual.isOpen) throw ShortPayNotPossible(number, "the ticket has no receipt waiting")
+        val received = accrual.lines.associateBy { it.itemId }
+        val priced =
+            invoice.lines.all { billed ->
+                val agreed = received[billed.itemId]?.unitCost
+                agreed == null ||
+                    (
+                        agreed.currency == billed.unitCost.currency &&
+                            tolerance.allows(agreed, billed.unitCost, billed.units)
+                    )
+            }
+        val payable =
+            invoice.lines
+                .map { it.unitCost * minOf(it.units, received[it.itemId]?.units ?: 0) }
+                .reduce(Money::plus)
+        val reason =
+            when {
+                !priced -> "a billed price is outside tolerance"
+                payable.isZero -> "none of the units billed were received"
+                payable >= invoice.amount -> "it bills no more than was received"
+                else -> null
+            }
+        if (reason != null) throw ShortPayNotPossible(number, reason)
+        return ShortPayment(payable, invoice.amount - payable, accrual.amount)
+    }
+
     private fun exceptionFor(
         billed: TicketAmountLine,
         received: TicketAmountLine?,
@@ -159,6 +209,16 @@ class TwoWayMatch(
         }
 }
 
+/**
+ * An invoice paid for what the store received: [payable] is owed, [deduction] is held back from what the vendor
+ * billed, and [accruedAmount] is what the ticket was accrued at.
+ */
+data class ShortPayment(
+    val payable: Money,
+    val deduction: Money,
+    val accruedAmount: Money,
+)
+
 /** A vendor's invoice for one direct store delivery ticket, and the outcome of matching it. */
 class DirectDeliveryInvoice private constructor(
     val id: InvoiceId,
@@ -183,7 +243,7 @@ class DirectDeliveryInvoice private constructor(
      * @throws OverrideByInvoiceCreator if [override] was approved by the person who entered the invoice.
      */
     fun requireMatchable(override: MatchOverride? = null) {
-        if (status is TicketInvoiceStatus.Matched) throw InvoiceAlreadyMatched(details.number)
+        if (status !is TicketInvoiceStatus.Exception) throw InvoiceAlreadyMatched(details.number)
         if (override?.approvedBy == enteredBy) throw OverrideByInvoiceCreator(details.number)
     }
 
@@ -231,19 +291,56 @@ class DirectDeliveryInvoice private constructor(
     }
 
     /**
-     * The invoice as a voucher needs it.
+     * Pays the invoice short, as [payment] says, on the word of [approval], and raises
+     * [DirectDeliveryInvoiceMatched] with the deduction.
      *
-     * @throws IllegalStateException unless the invoice has matched.
+     * @throws InvoiceAlreadyMatched if the invoice is already payable.
+     * @throws OverrideByInvoiceCreator if [approval] comes from the person who entered the invoice.
+     */
+    fun shortPay(
+        payment: ShortPayment,
+        approval: MatchOverride,
+        clock: Clock,
+    ) {
+        requireMatchable(approval)
+        val today = BusinessDate.today(clock)
+        status = TicketInvoiceStatus.ShortPaid(today, approval, payment.deduction)
+        raise(
+            DirectDeliveryInvoiceMatched(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                invoice = facts(),
+                invoiceAmount = amount.amount,
+                accruedAmount = payment.accruedAmount.amount,
+                costVariance = (payment.payable - payment.accruedAmount).amount,
+                currency = amount.currency.currencyCode,
+                deductionAmount = payment.deduction.amount,
+            ),
+        )
+    }
+
+    /**
+     * The invoice as a voucher needs it: what is owed on it, which is less than it bills if it was paid short.
+     *
+     * @throws IllegalStateException unless the invoice is payable.
      */
     fun matched(): MatchedInvoice {
-        val matched = status
-        check(matched is TicketInvoiceStatus.Matched) { "Invoice ${details.number} has not matched" }
-        return MatchedInvoice(
-            VoucheredInvoice(id, details.number, details.ticket.vendorId, purchaseOrderId = null, details.invoiceDate),
-            amount,
-            matched.matchedOn,
-            matched.override?.approvedBy,
-        )
+        val invoice =
+            VoucheredInvoice(id, details.number, details.ticket.vendorId, purchaseOrderId = null, details.invoiceDate)
+        return when (val payable = status) {
+            is TicketInvoiceStatus.Matched -> {
+                MatchedInvoice(invoice, amount, payable.matchedOn, payable.override?.approvedBy)
+            }
+
+            is TicketInvoiceStatus.ShortPaid -> {
+                MatchedInvoice(invoice, amount - payable.deduction, payable.matchedOn, payable.approval.approvedBy)
+            }
+
+            is TicketInvoiceStatus.Exception -> {
+                error("Invoice ${details.number} has not matched")
+            }
+        }
     }
 
     private fun facts() =
@@ -298,4 +395,12 @@ class TicketAlreadyInvoiced(
 ) : BusinessRuleViolation(
         "payables.ticket-already-invoiced",
         "An invoice for ticket $ticketNumber from this vendor at this store has already been entered",
+    )
+
+class ShortPayNotPossible(
+    number: VendorInvoiceNumber,
+    why: String,
+) : BusinessRuleViolation(
+        "payables.short-pay-not-possible",
+        "Invoice $number cannot be paid short: $why",
     )

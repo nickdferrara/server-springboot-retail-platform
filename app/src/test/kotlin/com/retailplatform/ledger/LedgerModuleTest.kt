@@ -5,6 +5,7 @@ import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
 import com.retailplatform.ledger.application.DirectDeliveryCorrectionPostingRule
+import com.retailplatform.ledger.application.DirectDeliveryInvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryReceivedPostingRule
 import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
@@ -284,6 +285,22 @@ class LedgerModuleTest(
         after.getValue(accruedDirect) - before.getOrDefault(accruedDirect, usd("0")) shouldBe usd("25.00")
         after.getValue(payable) - before.getOrDefault(payable, usd("0")) shouldBe usd("-25.20")
         after.getValue(variance) - before.getOrDefault(variance, usd("0")) shouldBe usd("0.20")
+
+        // A short-paid invoice credits accounts payable only for what is owed: 25.00 billed less 2.50 held back.
+        val shortPaid =
+            event.copy(
+                invoiceAmount = BigDecimal("25.0000"),
+                accruedAmount = BigDecimal("22.5000"),
+                costVariance = BigDecimal("0.0000"),
+                deductionAmount = BigDecimal("2.5000"),
+            )
+        requireNotNull(
+            DirectDeliveryInvoiceMatchedPostingRule().posting(shortPaid),
+        ).lines.map { it.role to it.amount } shouldBe
+            listOf(
+                PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES to usd("22.50"),
+                PostingAccount.ACCOUNTS_PAYABLE to usd("22.50"),
+            )
 
         // A payment that deducts a vendor credit clears only the rest of accounts payable.
         val withCredit = paymentIssued("25.0000", "0.0000", "20.0000").copy(creditAmount = BigDecimal("5.0000"))

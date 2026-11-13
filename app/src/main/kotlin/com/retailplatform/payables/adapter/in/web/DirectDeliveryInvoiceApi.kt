@@ -4,6 +4,7 @@ import com.retailplatform.payables.application.DirectDeliveryInvoiceQueries
 import com.retailplatform.payables.application.EnterDirectDeliveryInvoice
 import com.retailplatform.payables.application.OverrideDirectDeliveryException
 import com.retailplatform.payables.application.RematchDirectDeliveryInvoice
+import com.retailplatform.payables.application.ShortPayDirectDeliveryInvoice
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DirectDeliveryInvoice
 import com.retailplatform.payables.domain.TicketAmountLine
@@ -105,13 +106,21 @@ data class DirectDeliveryInvoiceResponse(
     val overrideApprovedBy: String?,
     val overrideReason: String?,
     val amount: MoneyDto,
+    val deduction: MoneyDto?,
+    val payable: MoneyDto?,
     val lines: List<TicketAmountLineResponse>,
     val exceptions: List<TicketExceptionResponse>,
 ) {
     companion object {
         fun from(invoice: DirectDeliveryInvoice): DirectDeliveryInvoiceResponse {
             val status = invoice.status
-            val matched = status as? TicketInvoiceStatus.Matched
+            val approval =
+                when (status) {
+                    is TicketInvoiceStatus.Matched -> status.override
+                    is TicketInvoiceStatus.ShortPaid -> status.approval
+                    is TicketInvoiceStatus.Exception -> null
+                }
+            val payable = if (status is TicketInvoiceStatus.Exception) null else invoice.matched()
             val ticket = invoice.details.ticket
             return DirectDeliveryInvoiceResponse(
                 id = invoice.id.toString(),
@@ -122,10 +131,12 @@ data class DirectDeliveryInvoiceResponse(
                 invoiceDate = invoice.details.invoiceDate.value,
                 enteredBy = invoice.enteredBy,
                 status = status.code,
-                matchedOn = matched?.matchedOn?.value,
-                overrideApprovedBy = matched?.override?.approvedBy,
-                overrideReason = matched?.override?.reason,
+                matchedOn = payable?.matchedOn?.value,
+                overrideApprovedBy = approval?.approvedBy,
+                overrideReason = approval?.reason,
                 amount = MoneyDto.from(invoice.amount),
+                deduction = (status as? TicketInvoiceStatus.ShortPaid)?.deduction?.let(MoneyDto::from),
+                payable = payable?.amount?.let(MoneyDto::from),
                 lines = invoice.lines.map(TicketAmountLineResponse::from),
                 exceptions =
                     (status as? TicketInvoiceStatus.Exception)?.exceptions.orEmpty().map {
@@ -142,6 +153,7 @@ class DirectDeliveryInvoiceController(
     private val enterInvoice: EnterDirectDeliveryInvoice,
     private val rematchInvoice: RematchDirectDeliveryInvoice,
     private val overrideException: OverrideDirectDeliveryException,
+    private val shortPayInvoice: ShortPayDirectDeliveryInvoice,
     private val queries: DirectDeliveryInvoiceQueries,
 ) {
     /** Enters a vendor's invoice for one delivery ticket and matches it at once. */
@@ -190,6 +202,20 @@ class DirectDeliveryInvoiceController(
     ): DirectDeliveryInvoiceResponse {
         val invoiceId = invoiceId(id)
         overrideException.handle(invoiceId, requireNotNull(request.reason))
+        return DirectDeliveryInvoiceResponse.from(queries.find(invoiceId))
+    }
+
+    /**
+     * Pays an invoice for what the store received and holds the rest back as a deduction against the vendor.
+     * For an accounting manager other than the person who entered the invoice.
+     */
+    @PostMapping("/{id}/short-pay")
+    fun shortPay(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): DirectDeliveryInvoiceResponse {
+        val invoiceId = invoiceId(id)
+        shortPayInvoice.handle(invoiceId, requireNotNull(request.reason))
         return DirectDeliveryInvoiceResponse.from(queries.find(invoiceId))
     }
 
