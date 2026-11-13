@@ -80,7 +80,7 @@ class InvoiceMatching(
         invoices.save(invoice)
         if (outcome is MatchOutcome.Matched) {
             open.forEach(accruals::save)
-            voucherRelease.releaseFor(invoice)
+            voucherRelease.releaseFor(invoice.matched())
         }
         invoice.releaseEvents().forEach(events::publishEvent)
     }

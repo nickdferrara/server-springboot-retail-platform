@@ -84,6 +84,14 @@ data class PaymentRunLine(
     val net: Money get() = amount - discount
 }
 
+/** A vendor credit a payment run deducts from what it pays the vendor. */
+data class PaymentRunCredit(
+    val creditId: VendorCreditId,
+    val vendorId: VendorId,
+    val ticketNumber: String,
+    val amount: Money,
+)
+
 /** Whether a payment run has been decided. */
 sealed interface PaymentRunStatus {
     /** A short name for the status, stored and shown to users. */
@@ -120,6 +128,7 @@ class PaymentRun private constructor(
     val window: PaymentWindow,
     val proposedBy: String,
     val lines: List<PaymentRunLine>,
+    val credits: List<PaymentRunCredit>,
     status: PaymentRunStatus,
     val version: Int,
 ) : AggregateRoot() {
@@ -147,7 +156,13 @@ class PaymentRun private constructor(
         return lines
             .groupBy { it.vendorId to it.amount.currency }
             .map { (payee, vouchers) ->
-                Payment.issue(nextNumber(), id, payee.first, window.paymentDate, vouchers, clock)
+                val deducted = credits.filter { it.vendorId == payee.first && it.amount.currency == payee.second }
+                Payment.issue(
+                    PaymentHeader(nextNumber(), id, payee.first, window.paymentDate),
+                    vouchers,
+                    deducted,
+                    clock,
+                )
             }
     }
 
@@ -171,7 +186,8 @@ class PaymentRun private constructor(
     companion object {
         /**
          * Proposes a run that pays [vouchers] on the window's payment date, reserving each of them and taking
-         * each early-payment discount still available that day.
+         * each early-payment discount still available that day. From [openCredits] it deducts, oldest first,
+         * each credit that fits whole within what the run pays that credit's vendor; the rest wait.
          *
          * @throws PaymentDateInPast if the payment date is before today.
          * @throws NothingToPay if [vouchers] is empty.
@@ -180,6 +196,7 @@ class PaymentRun private constructor(
         fun propose(
             window: PaymentWindow,
             vouchers: List<Voucher>,
+            openCredits: List<VendorCredit>,
             proposedBy: String,
             clock: Clock,
         ): PaymentRun {
@@ -200,7 +217,31 @@ class PaymentRun private constructor(
                         discount = it.discountOn(window.paymentDate),
                     )
                 }
-            return PaymentRun(id, window, proposedBy, lines, PaymentRunStatus.Proposed, version = 0)
+            val credits = deduct(openCredits, lines, id)
+            return PaymentRun(id, window, proposedBy, lines, credits, PaymentRunStatus.Proposed, version = 0)
+        }
+
+        private fun deduct(
+            openCredits: List<VendorCredit>,
+            lines: List<PaymentRunLine>,
+            id: PaymentRunId,
+        ): List<PaymentRunCredit> {
+            val payable =
+                lines
+                    .groupBy { it.vendorId to it.amount.currency }
+                    .mapValues { (_, owed) -> owed.map { it.net }.reduce(Money::plus) }
+                    .toMutableMap()
+            return openCredits.mapNotNull { credit ->
+                val payee = credit.ticket.vendorId to credit.amount.currency
+                val left = payable[payee]
+                if (left == null || credit.amount > left) {
+                    null
+                } else {
+                    payable[payee] = left - credit.amount
+                    credit.schedule(id)
+                    PaymentRunCredit(credit.id, credit.ticket.vendorId, credit.ticket.ticketNumber, credit.amount)
+                }
+            }
         }
 
         /** Rebuilds a payment run from stored state. Raises no events. */
@@ -209,50 +250,70 @@ class PaymentRun private constructor(
             window: PaymentWindow,
             proposedBy: String,
             lines: List<PaymentRunLine>,
+            credits: List<PaymentRunCredit>,
             status: PaymentRunStatus,
             version: Int,
-        ): PaymentRun = PaymentRun(id, window, proposedBy, lines, status, version)
+        ): PaymentRun = PaymentRun(id, window, proposedBy, lines, credits, status, version)
     }
 }
 
-/** A payment to one vendor: the [vouchers] it settles, paid on [paidOn]. Issued by approving a payment run. */
-class Payment private constructor(
-    val id: PaymentId,
+/** Which payment this is: its number, the run that issued it, who it pays, and when. */
+data class PaymentHeader(
     val number: PaymentNumber,
     val paymentRunId: PaymentRunId,
     val vendorId: VendorId,
     val paidOn: BusinessDate,
+)
+
+/**
+ * A payment to one vendor: the [vouchers] it settles and the vendor [credits] deducted from it. Issued by
+ * approving a payment run.
+ */
+class Payment private constructor(
+    val id: PaymentId,
+    val header: PaymentHeader,
     val vouchers: List<PaymentRunLine>,
+    val credits: List<PaymentRunCredit>,
 ) : AggregateRoot() {
+    val number: PaymentNumber get() = header.number
+    val paymentRunId: PaymentRunId get() = header.paymentRunId
+    val vendorId: VendorId get() = header.vendorId
+    val paidOn: BusinessDate get() = header.paidOn
+
     /** What the vouchers owed. */
     val gross: Money get() = vouchers.map { it.amount }.reduce(Money::plus)
 
     /** The early-payment discounts taken. */
     val discount: Money get() = vouchers.map { it.discount }.reduce(Money::plus)
 
-    /** What is paid to the vendor: gross less discount. */
-    val net: Money get() = gross - discount
+    /** The vendor credits deducted. */
+    val credit: Money get() = credits.map { it.amount }.fold(Money.zero(gross.currency), Money::plus)
+
+    /** What is paid to the vendor: gross less discount and credit. */
+    val net: Money get() = gross - discount - credit
 
     companion object {
-        /** Issues a payment for [vouchers], all owed to [vendorId] in one currency, and raises [PaymentIssued]. */
+        /**
+         * Issues a payment for [vouchers], all owed to one vendor in one currency, less that vendor's [credits],
+         * and raises [PaymentIssued].
+         */
         fun issue(
-            number: PaymentNumber,
-            paymentRunId: PaymentRunId,
-            vendorId: VendorId,
-            paidOn: BusinessDate,
+            header: PaymentHeader,
             vouchers: List<PaymentRunLine>,
+            credits: List<PaymentRunCredit>,
             clock: Clock,
         ): Payment {
             require(vouchers.isNotEmpty()) { "A payment settles at least one voucher" }
-            val payment = Payment(PaymentId.generate(clock), number, paymentRunId, vendorId, paidOn, vouchers)
+            val payment = Payment(PaymentId.generate(clock), header, vouchers, credits)
+            require(!payment.net.isNegative) { "Credits cannot exceed what a payment pays" }
             payment.raise(
                 PaymentIssued(
                     eventId = EventId.generate(clock),
                     occurredAt = clock.instant(),
-                    businessDate = paidOn,
+                    businessDate = header.paidOn,
                     paymentId = payment.id,
-                    paymentNumber = number.value,
-                    vendorId = vendorId,
+                    paymentNumber = header.number.value,
+                    vendorId = header.vendorId,
                     grossAmount = payment.gross.amount,
                     discountAmount = payment.discount.amount,
                     netAmount = payment.net.amount,
@@ -267,6 +328,7 @@ class Payment private constructor(
                                 it.discount.amount,
                             )
                         },
+                    creditAmount = payment.credit.amount,
                 ),
             )
             return payment
@@ -275,12 +337,10 @@ class Payment private constructor(
         /** Rebuilds a payment from stored state. Raises no events. */
         fun rehydrate(
             id: PaymentId,
-            number: PaymentNumber,
-            paymentRunId: PaymentRunId,
-            vendorId: VendorId,
-            paidOn: BusinessDate,
+            header: PaymentHeader,
             vouchers: List<PaymentRunLine>,
-        ): Payment = Payment(id, number, paymentRunId, vendorId, paidOn, vouchers)
+            credits: List<PaymentRunCredit>,
+        ): Payment = Payment(id, header, vouchers, credits)
     }
 }
 

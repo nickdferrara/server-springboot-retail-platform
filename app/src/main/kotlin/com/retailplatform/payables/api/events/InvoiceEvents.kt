@@ -8,12 +8,15 @@ import com.retailplatform.shared.VendorId
 import java.math.BigDecimal
 import java.time.Instant
 
-/** The vendor invoice an event is about. */
+/**
+ * The vendor invoice an event is about. [purchaseOrderId] is `null` for an invoice for a direct store delivery,
+ * which has no purchase order.
+ */
 data class InvoiceFacts(
     val invoiceId: InvoiceId,
     val vendorInvoiceNumber: String,
     val vendorId: VendorId,
-    val purchaseOrderId: PurchaseOrderId,
+    val purchaseOrderId: PurchaseOrderId?,
 )
 
 /**

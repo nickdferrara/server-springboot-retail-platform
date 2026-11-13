@@ -2,11 +2,14 @@ package com.retailplatform.payables.adapter.out.persistence
 
 import com.retailplatform.payables.application.DirectDeliveryAccrualRepository
 import com.retailplatform.payables.application.VendorCreditRepository
+import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
+import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.VendorCredit
 import com.retailplatform.payables.domain.VendorCreditId
+import com.retailplatform.payables.domain.VendorCreditStatus
 import com.retailplatform.platform.persistence.AuditMetadata
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.DirectDeliveryId
@@ -14,6 +17,7 @@ import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.Page
 import com.retailplatform.shared.PageQuery
+import com.retailplatform.shared.PaymentId
 import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import org.springframework.data.annotation.Id
@@ -47,6 +51,7 @@ data class DirectDeliveryAccrualEntity(
     val receivedOn: LocalDate,
     val amount: BigDecimal,
     val currency: String,
+    val relievedOn: LocalDate?,
     @MappedCollection(idColumn = "delivery_id", keyColumn = "position")
     val lines: List<DirectDeliveryAccrualLineEntity>,
     @Version val version: Int = 0,
@@ -69,6 +74,10 @@ data class VendorCreditEntity(
     val creditedOn: LocalDate,
     val amount: BigDecimal,
     val currency: String,
+    val status: String,
+    val paymentRunId: UUID?,
+    val paymentId: UUID?,
+    val appliedOn: LocalDate?,
     @MappedCollection(idColumn = "vendor_credit_id", keyColumn = "position")
     val lines: List<VendorCreditLineEntity>,
     @Version val version: Int = 0,
@@ -92,10 +101,23 @@ interface DirectDeliveryAccrualJdbcRepository : CrudRepository<DirectDeliveryAcc
     ): List<DirectDeliveryAccrualEntity>
 
     fun countByVendorId(vendorId: UUID): Long
+
+    fun findByVendorIdAndStoreIdAndTicketNumber(
+        vendorId: UUID,
+        storeId: UUID,
+        ticketNumber: String,
+    ): DirectDeliveryAccrualEntity?
 }
 
 interface VendorCreditJdbcRepository : CrudRepository<VendorCreditEntity, UUID> {
     fun existsByDeliveryId(deliveryId: UUID): Boolean
+
+    // The row locks keep a second payment run, proposed at the same moment, from deducting the same credits.
+    @Query(
+        "SELECT * FROM payables.vendor_credit WHERE status = 'OPEN' AND vendor_id IN (:vendorIds) " +
+            "ORDER BY credited_on, id FOR UPDATE",
+    )
+    fun findOpen(vendorIds: Collection<UUID>): List<VendorCreditEntity>
 
     @Query(
         "SELECT * FROM payables.vendor_credit WHERE vendor_id = :vendorId " +
@@ -110,12 +132,12 @@ interface VendorCreditJdbcRepository : CrudRepository<VendorCreditEntity, UUID> 
     fun countByVendorId(vendorId: UUID): Long
 }
 
-private fun List<TicketAmountLine>.toEntities() =
+internal fun List<TicketAmountLine>.toEntities() =
     map {
         TicketAmountLineEntity(it.itemId.value, it.units, it.unitCost.amount)
     }
 
-private fun TicketAmountLineEntity.toDomain(currency: Currency) =
+internal fun TicketAmountLineEntity.toDomain(currency: Currency) =
     TicketAmountLine.of(ItemId.of(itemId), units, Money.of(unitCost, currency))
 
 @Repository
@@ -124,6 +146,13 @@ class JdbcDirectDeliveryAccrualRepository(
 ) : DirectDeliveryAccrualRepository {
     override fun save(accrual: DirectDeliveryAccrual) {
         val ticket = accrual.ticket
+        // An update keeps the stored creation stamp; the version check refuses a stale write.
+        val audit =
+            if (accrual.version == 0) {
+                AuditMetadata()
+            } else {
+                accruals.findById(ticket.deliveryId.value).orElseThrow().audit
+            }
         accruals.save(
             DirectDeliveryAccrualEntity(
                 deliveryId = ticket.deliveryId.value,
@@ -134,13 +163,20 @@ class JdbcDirectDeliveryAccrualRepository(
                 receivedOn = ticket.receivedOn.value,
                 amount = accrual.amount.amount,
                 currency = accrual.amount.currency.currencyCode,
+                relievedOn = accrual.relievedOn?.value,
                 lines = accrual.lines.toEntities().map(::DirectDeliveryAccrualLineEntity),
                 version = accrual.version,
+                audit = audit,
             ),
         )
     }
 
     override fun existsFor(deliveryId: DirectDeliveryId): Boolean = accruals.existsById(deliveryId.value)
+
+    override fun findFor(ticket: BilledTicket): DirectDeliveryAccrual? =
+        accruals
+            .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
+            ?.toDomain()
 
     override fun findByVendor(
         vendorId: VendorId,
@@ -166,6 +202,7 @@ class JdbcDirectDeliveryAccrualRepository(
                     BusinessDate(receivedOn),
                 ),
             lines = lines.map { it.line.toDomain(money) },
+            relievedOn = relievedOn?.let(::BusinessDate),
             version = version,
         )
     }
@@ -177,6 +214,9 @@ class JdbcVendorCreditRepository(
 ) : VendorCreditRepository {
     override fun save(credit: VendorCredit) {
         val ticket = credit.ticket
+        // An update keeps the stored creation stamp; the version check refuses a stale write.
+        val audit = if (credit.version == 0) AuditMetadata() else credits.findById(credit.id.value).orElseThrow().audit
+        val status = credit.status
         credits.save(
             VendorCreditEntity(
                 id = credit.id.value,
@@ -188,13 +228,29 @@ class JdbcVendorCreditRepository(
                 creditedOn = ticket.receivedOn.value,
                 amount = credit.amount.amount,
                 currency = credit.amount.currency.currencyCode,
+                status = status.code,
+                paymentRunId =
+                    when (status) {
+                        is VendorCreditStatus.Scheduled -> status.paymentRunId.value
+                        is VendorCreditStatus.Applied -> status.paymentRunId.value
+                        VendorCreditStatus.Open -> null
+                    },
+                paymentId = (status as? VendorCreditStatus.Applied)?.paymentId?.value,
+                appliedOn = (status as? VendorCreditStatus.Applied)?.appliedOn?.value,
                 lines = credit.lines.toEntities().map(::VendorCreditLineEntity),
                 version = credit.version,
+                audit = audit,
             ),
         )
     }
 
     override fun existsFor(deliveryId: DirectDeliveryId): Boolean = credits.existsByDeliveryId(deliveryId.value)
+
+    override fun findByIds(ids: List<VendorCreditId>): List<VendorCredit> =
+        credits.findAllById(ids.map { it.value }).map { it.toDomain() }
+
+    override fun findOpen(vendorIds: Set<VendorId>): List<VendorCredit> =
+        if (vendorIds.isEmpty()) emptyList() else credits.findOpen(vendorIds.map { it.value }).map { it.toDomain() }
 
     override fun findByVendor(
         vendorId: VendorId,
@@ -221,7 +277,27 @@ class JdbcVendorCreditRepository(
                     BusinessDate(creditedOn),
                 ),
             lines = lines.map { it.line.toDomain(money) },
+            status = status(),
             version = version,
         )
     }
+
+    private fun VendorCreditEntity.status(): VendorCreditStatus =
+        when {
+            paymentRunId == null -> {
+                VendorCreditStatus.Open
+            }
+
+            paymentId != null && appliedOn != null -> {
+                VendorCreditStatus.Applied(
+                    PaymentRunId.of(paymentRunId),
+                    PaymentId.of(paymentId),
+                    BusinessDate(appliedOn),
+                )
+            }
+
+            else -> {
+                VendorCreditStatus.Scheduled(PaymentRunId.of(paymentRunId))
+            }
+        }
 }

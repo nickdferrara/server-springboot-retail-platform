@@ -3,11 +3,13 @@ package com.retailplatform.payables.domain
 import com.retailplatform.payables.api.events.PayableVoucherReleased
 import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.Percentage
 import com.retailplatform.shared.PurchaseOrderId
 import com.retailplatform.shared.ReceiptId
+import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import com.retailplatform.shared.WarehouseId
 import io.kotest.assertions.throwables.shouldThrow
@@ -77,6 +79,7 @@ class PaymentRunTest {
             PaymentRun.propose(
                 PaymentWindow.of(today, today.plusDays(7)),
                 listOf(discounted, plain),
+                emptyList(),
                 "clerk",
                 clock,
             )
@@ -86,17 +89,20 @@ class PaymentRunTest {
         run.lines.map { it.net } shouldBe listOf(usd("196.00"), usd("50.00"))
         discounted.status shouldBe VoucherStatus.Scheduled(run.id)
         shouldThrow<VoucherNotReleased> {
-            PaymentRun.propose(PaymentWindow.of(today, today), listOf(discounted), "clerk", clock)
+            PaymentRun.propose(PaymentWindow.of(today, today), listOf(discounted), emptyList(), "clerk", clock)
         }
     }
 
     @Test
     fun `a run needs something to pay and a payment date that has not passed`() {
-        shouldThrow<NothingToPay> { PaymentRun.propose(PaymentWindow.of(today, today), emptyList(), "clerk", clock) }
+        shouldThrow<NothingToPay> {
+            PaymentRun.propose(PaymentWindow.of(today, today), emptyList(), emptyList(), "clerk", clock)
+        }
         shouldThrow<PaymentDateInPast> {
             PaymentRun.propose(
                 PaymentWindow.of(today.minusDays(1), today),
                 listOf(voucher(acme, "10.00", net30)),
+                emptyList(),
                 "clerk",
                 clock,
             )
@@ -108,7 +114,14 @@ class PaymentRunTest {
         val first = voucher(acme, "200.00", twoTenNet30, invoiceDate = today.minusDays(5))
         val second = voucher(acme, "100.00", net30, invoiceDate = today.minusDays(30))
         val other = voucher(bolt, "50.00", net30, invoiceDate = today.minusDays(30))
-        val run = PaymentRun.propose(PaymentWindow.of(today, today), listOf(first, second, other), "clerk", clock)
+        val run =
+            PaymentRun.propose(
+                PaymentWindow.of(today, today),
+                listOf(first, second, other),
+                emptyList(),
+                "clerk",
+                clock,
+            )
 
         val payments = run.approve("manager", ::nextPaymentNumber, clock)
 
@@ -139,6 +152,7 @@ class PaymentRunTest {
             PaymentRun.propose(
                 PaymentWindow.of(today, today),
                 listOf(voucher(acme, "10.00", net30)),
+                emptyList(),
                 "clerk",
                 clock,
             )
@@ -152,7 +166,7 @@ class PaymentRunTest {
     @Test
     fun `cancelling a run gives its vouchers back`() {
         val voucher = voucher(acme, "10.00", net30)
-        val run = PaymentRun.propose(PaymentWindow.of(today, today), listOf(voucher), "clerk", clock)
+        val run = PaymentRun.propose(PaymentWindow.of(today, today), listOf(voucher), emptyList(), "clerk", clock)
 
         run.cancel("clerk", clock)
         voucher.unschedule(run.id)
@@ -160,6 +174,40 @@ class PaymentRunTest {
         run.status shouldBe PaymentRunStatus.Cancelled("clerk", today)
         voucher.status shouldBe VoucherStatus.Released
         shouldThrow<IllegalStateException> { voucher.unschedule(run.id) }
+    }
+
+    @Test
+    fun `a run deducts the credits that fit whole within what it pays their vendor, oldest first`() {
+        val owed = voucher(acme, "100.00", net30, invoiceDate = today.minusDays(30))
+        val oldest = credit(acme, "T-1", units = 30, receivedOn = today.minusDays(9))
+        val tooBig = credit(acme, "T-2", units = 80, receivedOn = today.minusDays(5))
+        val newest = credit(acme, "T-3", units = 70, receivedOn = today.minusDays(1))
+        val elsewhere = credit(bolt, "T-4", units = 1, receivedOn = today.minusDays(9))
+        val window = PaymentWindow.of(today, today)
+
+        val run = PaymentRun.propose(window, listOf(owed), listOf(oldest, tooBig, newest, elsewhere), "clerk", clock)
+
+        // 30.00 and then 70.00 fit within 100.00; 80.00 does not fit after the first, and bolt is not being paid.
+        run.credits.map { it.creditId } shouldBe listOf(oldest.id, newest.id)
+        oldest.status shouldBe VendorCreditStatus.Scheduled(run.id)
+        tooBig.isOpen shouldBe true
+        elsewhere.isOpen shouldBe true
+
+        val payment = run.approve("manager", ::nextPaymentNumber, clock).single()
+        payment.gross shouldBe usd("100.00")
+        payment.credit shouldBe usd("100.00")
+        payment.net shouldBe usd("0.00")
+        val event = payment.releaseEvents().single().shouldBeInstanceOf<PaymentIssued>()
+        event.creditAmount shouldBe BigDecimal("100.0000")
+        event.netAmount shouldBe BigDecimal("0.0000")
+
+        oldest.apply(run.id, payment.id, payment.paidOn)
+        oldest.status shouldBe VendorCreditStatus.Applied(run.id, payment.id, today)
+        shouldThrow<IllegalStateException> { oldest.apply(run.id, payment.id, today) }
+        shouldThrow<IllegalStateException> { oldest.schedule(run.id) }
+        newest.unschedule(run.id)
+        newest.isOpen shouldBe true
+        shouldThrow<IllegalStateException> { newest.unschedule(run.id) }
     }
 
     @Test
@@ -210,8 +258,27 @@ class PaymentRunTest {
             )
         val match = ThreeWayMatch(MatchTolerance.of(Percentage.of("2"), BigDecimal("10.00")))
         invoice.record(match.match(invoice, listOf(accrual)), clock)
-        return Voucher.release(VoucherNumber.of(number.toString()), invoice, terms, clock)
+        return Voucher.release(VoucherNumber.of(number.toString()), invoice.matched(), terms, clock)
     }
+
+    /** A credit for [units] units at 1.00 each. */
+    private fun credit(
+        vendorId: VendorId,
+        ticket: String,
+        units: Int,
+        receivedOn: BusinessDate,
+    ) = VendorCredit.record(
+        DeliveredTicket(
+            DirectDeliveryId.generate(clock),
+            "100001",
+            vendorId,
+            StoreId.generate(clock),
+            ticket,
+            receivedOn,
+        ),
+        listOf(TicketAmountLine.of(ItemId.generate(clock), units, usd("1.00"))),
+        clock,
+    )
 
     private fun nextPaymentNumber() = PaymentNumber.of((++numbers).toString())
 

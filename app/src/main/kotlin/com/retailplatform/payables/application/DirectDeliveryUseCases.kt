@@ -1,9 +1,11 @@
 package com.retailplatform.payables.application
 
+import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.VendorCredit
+import com.retailplatform.payables.domain.VendorCreditId
 import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.Page
 import com.retailplatform.shared.PageQuery
@@ -18,6 +20,9 @@ interface DirectDeliveryAccrualRepository {
 
     fun existsFor(deliveryId: DirectDeliveryId): Boolean
 
+    /** The accrual for a vendor's ticket at a store, if the store has checked it in with anything delivered. */
+    fun findFor(ticket: BilledTicket): DirectDeliveryAccrual?
+
     /** A vendor's accruals, the oldest delivery first. */
     fun findByVendor(
         vendorId: VendorId,
@@ -30,6 +35,14 @@ interface VendorCreditRepository {
     fun save(credit: VendorCredit)
 
     fun existsFor(deliveryId: DirectDeliveryId): Boolean
+
+    fun findByIds(ids: List<VendorCreditId>): List<VendorCredit>
+
+    /**
+     * The open credits of [vendorIds], the oldest first. Their rows are locked until the transaction ends, so two
+     * payment runs proposed at once cannot both deduct a credit.
+     */
+    fun findOpen(vendorIds: Set<VendorId>): List<VendorCredit>
 
     /** A vendor's credits, the oldest first. */
     fun findByVendor(

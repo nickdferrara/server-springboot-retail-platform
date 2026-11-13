@@ -4,6 +4,7 @@ import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
+import com.retailplatform.shared.PaymentId
 import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.TypedId
 import com.retailplatform.shared.TypedIdFactory
@@ -61,9 +62,23 @@ data class TicketAmountLine private constructor(
 class DirectDeliveryAccrual private constructor(
     val ticket: DeliveredTicket,
     val lines: List<TicketAmountLine>,
+    relievedOn: BusinessDate?,
     val version: Int,
 ) {
+    /** The day the vendor's invoice matched and the amount moved to accounts payable; `null` while it waits. */
+    var relievedOn: BusinessDate? = relievedOn
+        private set
+
     val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
+
+    /** Whether the accrual still waits for the vendor's invoice. */
+    val isOpen: Boolean get() = relievedOn == null
+
+    /** Relieves the whole accrual: a ticket is invoiced once, for exactly what was received. */
+    fun relieve(on: BusinessDate) {
+        check(isOpen) { "The accrual for ticket ${ticket.ticketNumber} was already relieved" }
+        relievedOn = on
+    }
 
     companion object {
         /** Accrues the delivered [lines] of [ticket]. */
@@ -72,29 +87,85 @@ class DirectDeliveryAccrual private constructor(
             lines: List<TicketAmountLine>,
         ): DirectDeliveryAccrual {
             require(lines.isNotEmpty()) { "An accrual has at least one line" }
-            return DirectDeliveryAccrual(ticket, lines, version = 0)
+            return DirectDeliveryAccrual(ticket, lines, relievedOn = null, version = 0)
         }
 
         /** Rebuilds an accrual from stored state. */
         fun rehydrate(
             ticket: DeliveredTicket,
             lines: List<TicketAmountLine>,
+            relievedOn: BusinessDate?,
             version: Int,
-        ): DirectDeliveryAccrual = DirectDeliveryAccrual(ticket, lines, version)
+        ): DirectDeliveryAccrual = DirectDeliveryAccrual(ticket, lines, relievedOn, version)
+    }
+}
+
+/** Whether a vendor credit has been used. */
+sealed interface VendorCreditStatus {
+    /** A short name for the status, stored and shown to users. */
+    val code: String
+
+    /** Waiting to be deducted from a payment to the vendor. */
+    data object Open : VendorCreditStatus {
+        override val code = "OPEN"
+    }
+
+    /** Selected by a payment run that has not been approved yet. */
+    data class Scheduled(
+        val paymentRunId: PaymentRunId,
+    ) : VendorCreditStatus {
+        override val code = "SCHEDULED"
+    }
+
+    /** Deducted on [appliedOn] from the payment [paymentId] that the run [paymentRunId] issued. */
+    data class Applied(
+        val paymentRunId: PaymentRunId,
+        val paymentId: PaymentId,
+        val appliedOn: BusinessDate,
+    ) : VendorCreditStatus {
+        override val code = "APPLIED"
     }
 }
 
 /**
  * What a vendor owes for product its driver took back from a store on one ticket, at agreed cost. It stands on
- * its own until it is deducted from a payment to the vendor.
+ * its own until a payment run deducts it, whole, from a payment to the vendor.
  */
 class VendorCredit private constructor(
     val id: VendorCreditId,
     val ticket: DeliveredTicket,
     val lines: List<TicketAmountLine>,
+    status: VendorCreditStatus,
     val version: Int,
 ) {
+    var status: VendorCreditStatus = status
+        private set
+
     val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
+
+    val isOpen: Boolean get() = status == VendorCreditStatus.Open
+
+    /** Reserves the credit for a payment run, so no other run deducts it. */
+    fun schedule(paymentRunId: PaymentRunId) {
+        check(isOpen) { "Credit $id is already in a payment run or applied" }
+        status = VendorCreditStatus.Scheduled(paymentRunId)
+    }
+
+    /** Gives the credit back when the payment run [paymentRunId] that reserved it is cancelled. */
+    fun unschedule(paymentRunId: PaymentRunId) {
+        check(status == VendorCreditStatus.Scheduled(paymentRunId)) { "Credit $id is not in payment run $paymentRunId" }
+        status = VendorCreditStatus.Open
+    }
+
+    /** Deducts the credit from the payment [paymentId] made on [appliedOn] by the run that reserved it. */
+    fun apply(
+        paymentRunId: PaymentRunId,
+        paymentId: PaymentId,
+        appliedOn: BusinessDate,
+    ) {
+        check(status == VendorCreditStatus.Scheduled(paymentRunId)) { "Credit $id is not in payment run $paymentRunId" }
+        status = VendorCreditStatus.Applied(paymentRunId, paymentId, appliedOn)
+    }
 
     companion object {
         /** Records a credit for the returned [lines] of [ticket]. */
@@ -104,7 +175,7 @@ class VendorCredit private constructor(
             clock: Clock,
         ): VendorCredit {
             require(lines.isNotEmpty()) { "A credit has at least one line" }
-            return VendorCredit(VendorCreditId.generate(clock), ticket, lines, version = 0)
+            return VendorCredit(VendorCreditId.generate(clock), ticket, lines, VendorCreditStatus.Open, version = 0)
         }
 
         /** Rebuilds a credit from stored state. */
@@ -112,7 +183,8 @@ class VendorCredit private constructor(
             id: VendorCreditId,
             ticket: DeliveredTicket,
             lines: List<TicketAmountLine>,
+            status: VendorCreditStatus,
             version: Int,
-        ): VendorCredit = VendorCredit(id, ticket, lines, version)
+        ): VendorCredit = VendorCredit(id, ticket, lines, status, version)
     }
 }

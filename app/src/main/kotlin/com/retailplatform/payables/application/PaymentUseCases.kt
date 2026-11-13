@@ -45,13 +45,14 @@ fun interface PaymentNumbers {
 
 /**
  * Use case: propose a payment run. It selects every released voucher that is due on or before the window's
- * pay-through date, or whose early-payment discount would run out by then, and reserves them until the run is
- * approved or cancelled.
+ * pay-through date, or whose early-payment discount would run out by then, deducts the open credits of the
+ * vendors it pays, and reserves vouchers and credits until the run is approved or cancelled.
  */
 @Service
 class ProposePaymentRun(
     private val runs: PaymentRunRepository,
     private val vouchers: VoucherRepository,
+    private val credits: VendorCreditRepository,
     private val currentUser: CurrentUser,
     private val clock: Clock,
 ) {
@@ -59,9 +60,11 @@ class ProposePaymentRun(
     @Transactional
     fun handle(window: PaymentWindow): PaymentRunId {
         val payable = vouchers.findPayable(window)
-        val run = PaymentRun.propose(window, payable, currentUser.name, clock)
+        val openCredits = credits.findOpen(payable.map { it.invoice.vendorId }.toSet())
+        val run = PaymentRun.propose(window, payable, openCredits, currentUser.name, clock)
         runs.save(run)
         payable.forEach(vouchers::save)
+        openCredits.filterNot { it.isOpen }.forEach(credits::save)
         return run.id
     }
 }
@@ -76,6 +79,7 @@ class ApprovePaymentRun(
     private val payments: PaymentRepository,
     private val numbers: PaymentNumbers,
     private val vouchers: VoucherRepository,
+    private val credits: VendorCreditRepository,
     private val currentUser: CurrentUser,
     private val events: ApplicationEventPublisher,
     private val clock: Clock,
@@ -88,6 +92,7 @@ class ApprovePaymentRun(
         runs.save(run)
 
         val reserved = vouchers.findByIds(run.lines.map { it.voucherId }).associateBy { it.id }
+        val deducted = credits.findByIds(run.credits.map { it.creditId }).associateBy { it.id }
         issued.forEach { payment ->
             payments.save(payment)
             payment.vouchers.forEach { line ->
@@ -95,16 +100,22 @@ class ApprovePaymentRun(
                 voucher.pay(run.id, payment.id, payment.paidOn)
                 vouchers.save(voucher)
             }
+            payment.credits.forEach { line ->
+                val credit = deducted.getValue(line.creditId)
+                credit.apply(run.id, payment.id, payment.paidOn)
+                credits.save(credit)
+            }
             payment.releaseEvents().forEach(events::publishEvent)
         }
     }
 }
 
-/** Use case: cancel a payment run that has not been approved, giving its vouchers back. */
+/** Use case: cancel a payment run that has not been approved, giving its vouchers and credits back. */
 @Service
 class CancelPaymentRun(
     private val runs: PaymentRunRepository,
     private val vouchers: VoucherRepository,
+    private val credits: VendorCreditRepository,
     private val currentUser: CurrentUser,
     private val clock: Clock,
 ) {
@@ -117,6 +128,10 @@ class CancelPaymentRun(
         vouchers.findByIds(run.lines.map { it.voucherId }).forEach {
             it.unschedule(run.id)
             vouchers.save(it)
+        }
+        credits.findByIds(run.credits.map { it.creditId }).forEach {
+            it.unschedule(run.id)
+            credits.save(it)
         }
     }
 }

@@ -21,6 +21,8 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.JournalEntryUnbalanced
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
+import com.retailplatform.payables.api.events.DirectDeliveryInvoiceFacts
+import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceFacts
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
@@ -241,6 +243,50 @@ class LedgerModuleTest(
             )
         rule.posting(directDelivery(DirectDeliveryLine(1, ItemId.generate(clock), 4, 0, BigDecimal("0.0000")))) shouldBe
             null
+    }
+
+    @Test
+    fun `a matched direct delivery invoice moves its accrual to accounts payable with the variance`(
+        scenario: Scenario,
+    ) {
+        val before = balances()
+        val event =
+            DirectDeliveryInvoiceMatched(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                invoice =
+                    DirectDeliveryInvoiceFacts(
+                        InvoiceId.generate(clock),
+                        "DSD-77",
+                        VendorId.generate(clock),
+                        StoreId.generate(clock),
+                        "T-77",
+                    ),
+                invoiceAmount = BigDecimal("25.2000"),
+                accruedAmount = BigDecimal("25.0000"),
+                costVariance = BigDecimal("0.2000"),
+                currency = "USD",
+            )
+
+        scenario
+            .publish(event)
+            .andWaitForEventOfType(JournalEntryPosted::class.java)
+            .matching { it.sourceEventId == event.eventId }
+            .toArriveAndVerify { journalEntry -> journalEntry.journal shouldBe "PURCHASES" }
+
+        val after = balances()
+        val accruedDirect = AccountNumber.of("01-2110-0000-00")
+        val payable = AccountNumber.of("01-2000-0000-00")
+        val variance = AccountNumber.of("01-5100-0000-00")
+        after.getValue(accruedDirect) - before.getOrDefault(accruedDirect, usd("0")) shouldBe usd("25.00")
+        after.getValue(payable) - before.getOrDefault(payable, usd("0")) shouldBe usd("-25.20")
+        after.getValue(variance) - before.getOrDefault(variance, usd("0")) shouldBe usd("0.20")
+
+        // A payment that deducts a vendor credit clears only the rest of accounts payable.
+        val withCredit = paymentIssued("25.0000", "0.0000", "20.0000").copy(creditAmount = BigDecimal("5.0000"))
+        requireNotNull(PaymentIssuedPostingRule().posting(withCredit)).lines.map { it.role to it.amount } shouldBe
+            listOf(PostingAccount.ACCOUNTS_PAYABLE to usd("20.00"), PostingAccount.BANK to usd("20.00"))
     }
 
     private fun directDelivery(vararg lines: DirectDeliveryLine) =
