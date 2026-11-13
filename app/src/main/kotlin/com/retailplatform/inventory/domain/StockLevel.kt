@@ -70,6 +70,27 @@ class StockLevel private constructor(
     }
 
     /**
+     * Gives [quantity] back to its vendor. Like all stock leaving, it is valued at average cost and leaves the
+     * average unchanged; [creditedCost], what the vendor credits per unit, is used only when no cost is known
+     * yet. On-hand may go below zero, because what the driver took was on the shelf whatever the books say.
+     *
+     * @throws QuantityNotInBaseUnit if [quantity] is not in the item's base unit.
+     * @throws QuantityNotPositive unless [quantity] is above zero.
+     */
+    fun returnToVendor(
+        quantity: Quantity,
+        creditedCost: Money,
+        businessDate: BusinessDate,
+        source: MovementSource,
+        clock: Clock,
+    ): InventoryMovement {
+        requireBaseUnit(quantity)
+        if (!quantity.isPositive) throw QuantityNotPositive(quantity)
+        val entry = Entry(MovementType.VENDOR_RETURN, reason = null, -quantity, businessDate, source)
+        return post(entry, creditedCost.takeIf { averageCost == null }, clock)
+    }
+
+    /**
      * Corrects on-hand by [quantity], raising [InventoryAdjusted]. A reduction is valued at average cost. An
      * increase is valued at [unitCost] if given, otherwise at average cost.
      *

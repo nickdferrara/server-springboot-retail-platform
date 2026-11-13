@@ -32,7 +32,11 @@ import com.retailplatform.locations.domain.LocationName
 import com.retailplatform.locations.domain.StoreNumber
 import com.retailplatform.locations.domain.WarehouseNumber
 import com.retailplatform.platform.security.Roles
+import com.retailplatform.receiving.api.events.DirectDeliveryFacts
+import com.retailplatform.receiving.api.events.DirectDeliveryLine
+import com.retailplatform.receiving.api.events.DirectDeliveryReceived
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.EventId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
@@ -40,6 +44,7 @@ import com.retailplatform.shared.PageQuery
 import com.retailplatform.shared.Quantity
 import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.UnitOfMeasure
+import com.retailplatform.shared.VendorId
 import com.retailplatform.shared.WarehouseId
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.collections.shouldContain
@@ -197,6 +202,46 @@ class InventoryModuleTest(
                 it.after.onHand.amount
                     .toInt()
             }.sorted() shouldBe (1..together).map { it * 12 }
+    }
+
+    @Test
+    fun `a direct delivery enters the store's stock and what the driver took back leaves it`(scenario: Scenario) {
+        val cola = item("700010")
+        val chips = item("700011")
+        val storeId = (store as StockLocation.Store).storeId
+        val event =
+            DirectDeliveryReceived(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                delivery =
+                    DirectDeliveryFacts(
+                        DirectDeliveryId.generate(clock),
+                        "100077",
+                        VendorId.generate(clock),
+                        storeId,
+                        "T-1",
+                    ),
+                currency = "USD",
+                lines =
+                    listOf(
+                        DirectDeliveryLine(1, cola, 20, 3, BigDecimal("1.2500")),
+                        DirectDeliveryLine(2, chips, 0, 5, BigDecimal("0.8000")),
+                    ),
+            )
+
+        scenario
+            .publish(event)
+            .andWaitForStateChange(
+                Supplier { Optional.of(stock.onHand(chips, store)).filter { !it.onHand.isZero } },
+            ).andVerify { it.isPresent shouldBe true }
+
+        stock.onHand(cola, store).onHand shouldBe each(17)
+        stock.onHand(cola, store).averageCost shouldBe usd("1.25")
+        stock.onHand(chips, store).onHand shouldBe each(-5)
+        val movements = stock.movements(cola, store, PageQuery.of()).items
+        movements.map { it.type } shouldBe listOf(MovementType.VENDOR_RETURN, MovementType.RECEIPT)
+        movements.first().source.reference shouldBe "Receipt 100077"
     }
 
     @Test

@@ -67,6 +67,12 @@ enum class PostingAccount {
     /** Owed to vendors for goods received and not yet invoiced. */
     ACCRUED_PAYABLES,
 
+    /** Merchandise held at stores. */
+    STORE_INVENTORY,
+
+    /** Owed to vendors for goods delivered straight to stores and not yet invoiced. */
+    ACCRUED_DIRECT_DELIVERY_PAYABLES,
+
     /** Owed to vendors on matched invoices. */
     ACCOUNTS_PAYABLE,
 

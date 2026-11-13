@@ -15,6 +15,9 @@ enum class MovementType {
 
     /** On-hand was corrected: shrink, damage, or a count. */
     ADJUSTMENT,
+
+    /** A vendor took product back, such as out-of-date stock picked up by its driver. */
+    VENDOR_RETURN,
 }
 
 /** Why on-hand was corrected. */

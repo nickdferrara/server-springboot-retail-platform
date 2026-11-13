@@ -37,3 +37,4 @@ retail:
         - Pricing.Analyst
         - Inventory.Controller
         - Receiving.Clerk
+        - Store.Manager

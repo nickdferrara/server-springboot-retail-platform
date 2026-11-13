@@ -136,6 +136,26 @@ class StockLevelTest {
         shouldThrow<IllegalArgumentException> { StockLocation.of("TRUCK", store.id) }
     }
 
+    @Test
+    fun `product a vendor takes back leaves at average cost, even past zero on hand`() {
+        val level = stocked(onHand = 10, averageCost = "1.30")
+        val source = MovementSource("Receipt 100009", EventId.generate(clock))
+
+        val returned = level.returnToVendor(each(4), usd("1.25"), today, source, clock)
+
+        returned.type shouldBe MovementType.VENDOR_RETURN
+        returned.quantity shouldBe each(-4)
+        returned.unitCost shouldBe usd("1.30")
+        returned.after shouldBe StockPosition(each(6), usd("1.30"))
+        level.returnToVendor(each(8), usd("1.25"), today, source, clock).after.onHand shouldBe each(-2)
+        shouldThrow<QuantityNotPositive> { level.returnToVendor(each(0), usd("1.25"), today, source, clock) }
+
+        // With no cost known yet, the credited cost values what leaves.
+        val unknown = empty()
+        unknown.returnToVendor(each(2), usd("1.25"), today, source, clock).unitCost shouldBe usd("1.25")
+        unknown.averageCost shouldBe usd("1.25")
+    }
+
     private fun empty() = StockLevel.empty(itemId, warehouse, UnitOfMeasure.EACH, clock)
 
     private fun stocked(
