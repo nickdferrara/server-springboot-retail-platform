@@ -139,3 +139,13 @@ value class PaymentId private constructor(
 
     companion object : TypedIdFactory<PaymentId>(::PaymentId)
 }
+
+/** Identifies a vendor's delivery straight to a store, checked in from the driver's ticket. */
+@JvmInline
+value class DirectDeliveryId private constructor(
+    override val value: UUID,
+) : TypedId {
+    override fun toString(): String = value.toString()
+
+    companion object : TypedIdFactory<DirectDeliveryId>(::DirectDeliveryId)
+}

@@ -6,6 +6,7 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
+import com.retailplatform.receiving.api.events.DirectDeliveryReceived
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.Money
@@ -121,6 +122,42 @@ class PaymentIssuedPostingRule : PostingRule<PaymentIssued> {
             businessDate = event.businessDate,
             source = EntrySource("payables", event.eventId, "Payment ${event.paymentNumber}"),
             description = "Vendor payment ${event.paymentNumber}",
+            lines = lines,
+        )
+    }
+}
+
+/**
+ * Direct store delivery received: credit accrued direct delivery payables for what was delivered, debit accounts
+ * payable for the vendor credit on what the driver took back, and put the difference to store inventory, all at
+ * agreed cost.
+ */
+@Component
+class DirectDeliveryReceivedPostingRule : PostingRule<DirectDeliveryReceived> {
+    override fun posting(event: DirectDeliveryReceived): Posting? {
+        val currency = Currency.getInstance(event.currency)
+        val zero = Money.zero(currency)
+        val delivered = event.lines.map { Money.of(it.unitCost, currency) * it.unitsDelivered }.fold(zero, Money::plus)
+        val returned = event.lines.map { Money.of(it.unitCost, currency) * it.unitsReturned }.fold(zero, Money::plus)
+        val intoStock = delivered - returned
+        val lines =
+            listOf(
+                PostingLine(
+                    PostingAccount.STORE_INVENTORY,
+                    if (intoStock.isNegative) EntrySide.CREDIT else EntrySide.DEBIT,
+                    if (intoStock.isNegative) -intoStock else intoStock,
+                ),
+                PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.DEBIT, returned),
+                PostingLine(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.CREDIT, delivered),
+            ).filterNot { it.amount.isZero }
+        if (lines.isEmpty()) return null
+
+        val delivery = event.delivery
+        return Posting(
+            journal = Journal.INVENTORY,
+            businessDate = event.businessDate,
+            source = EntrySource("receiving", event.eventId, "Receipt ${delivery.receiptNumber}"),
+            description = "Direct store delivery on ticket ${delivery.ticketNumber}",
             lines = lines,
         )
     }

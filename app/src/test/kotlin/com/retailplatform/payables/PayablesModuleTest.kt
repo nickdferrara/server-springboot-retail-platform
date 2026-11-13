@@ -9,6 +9,7 @@ import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.payables.application.AccrualQueries
 import com.retailplatform.payables.application.ApprovePaymentRun
 import com.retailplatform.payables.application.CancelPaymentRun
+import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
 import com.retailplatform.payables.application.EnterVendorInvoice
 import com.retailplatform.payables.application.InvoiceQueries
 import com.retailplatform.payables.application.OverrideMatchException
@@ -16,6 +17,8 @@ import com.retailplatform.payables.application.PaymentQueries
 import com.retailplatform.payables.application.ProposePaymentRun
 import com.retailplatform.payables.application.RecordAccrual
 import com.retailplatform.payables.application.RecordAccrualCommand
+import com.retailplatform.payables.application.RecordDirectDelivery
+import com.retailplatform.payables.application.RecordDirectDeliveryCommand
 import com.retailplatform.payables.application.RematchVendorInvoice
 import com.retailplatform.payables.application.VendorTermsRepository
 import com.retailplatform.payables.application.VoucherQueries
@@ -42,11 +45,15 @@ import com.retailplatform.payables.domain.VendorTerms
 import com.retailplatform.payables.domain.VoucherDiscount
 import com.retailplatform.payables.domain.VoucherStatus
 import com.retailplatform.platform.security.Roles
+import com.retailplatform.receiving.api.events.DirectDeliveryFacts
+import com.retailplatform.receiving.api.events.DirectDeliveryLine
+import com.retailplatform.receiving.api.events.DirectDeliveryReceived
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.receiving.api.events.GoodsReceivedLine
 import com.retailplatform.receiving.api.events.ReceiptFacts
 import com.retailplatform.shared.AccrualId
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.EventId
 import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
@@ -57,6 +64,7 @@ import com.retailplatform.shared.Percentage
 import com.retailplatform.shared.PurchaseOrderId
 import com.retailplatform.shared.ReceiptId
 import com.retailplatform.shared.ResourceNotFound
+import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import com.retailplatform.shared.VoucherId
 import com.retailplatform.shared.WarehouseId
@@ -98,6 +106,8 @@ class PayablesModuleTest(
     @Autowired private val approvePaymentRun: ApprovePaymentRun,
     @Autowired private val cancelPaymentRun: CancelPaymentRun,
     @Autowired private val payments: PaymentQueries,
+    @Autowired private val recordDirectDelivery: RecordDirectDelivery,
+    @Autowired private val directDeliveries: DirectDeliveryPayablesQueries,
     @Autowired private val clock: Clock,
 ) {
     private val today get() = BusinessDate.today(clock)
@@ -417,6 +427,53 @@ class PayablesModuleTest(
         cancelPaymentRun.handle(next)
         shouldThrow<ResourceNotFound> { cancelPaymentRun.handle(PaymentRunId.generate(clock)) }
         shouldThrow<PaymentDateInPast> { proposePaymentRun.handle(PaymentWindow.of(today.minusDays(1), today)) }
+    }
+
+    @Test
+    fun `a direct delivery is accrued for what came and credited for what the driver took back`(scenario: Scenario) {
+        val vendorId = VendorId.generate(clock)
+        val event =
+            DirectDeliveryReceived(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                delivery =
+                    DirectDeliveryFacts(
+                        DirectDeliveryId.generate(clock),
+                        "100077",
+                        vendorId,
+                        StoreId.generate(clock),
+                        "T-1",
+                    ),
+                currency = "USD",
+                lines =
+                    listOf(
+                        DirectDeliveryLine(1, ItemId.generate(clock), 20, 3, BigDecimal("1.2500")),
+                        DirectDeliveryLine(2, ItemId.generate(clock), 0, 5, BigDecimal("0.8000")),
+                    ),
+            )
+
+        scenario
+            .publish(event)
+            .andWaitForStateChange { directDeliveries.credits(vendorId, PageQuery.of()).total == 1L }
+            .andVerify { it shouldBe true }
+
+        val accrual = directDeliveries.accruals(vendorId, PageQuery.of()).items.single()
+        accrual.amount shouldBe usd("25.00")
+        accrual.ticket.ticketNumber shouldBe "T-1"
+        accrual.ticket.receivedOn shouldBe today
+        accrual.lines.single().units shouldBe 20
+        val credit = directDeliveries.credits(vendorId, PageQuery.of()).items.single()
+        credit.amount shouldBe usd("7.75")
+        credit.lines.map { it.units } shouldBe listOf(3, 5)
+        credit.ticket.deliveryId shouldBe event.delivery.deliveryId
+
+        // The same delivery arriving again accrues and credits nothing more.
+        recordDirectDelivery.handle(
+            RecordDirectDeliveryCommand(accrual.ticket, accrual.lines, credit.lines),
+        )
+        directDeliveries.accruals(vendorId, PageQuery.of()).total shouldBe 1
+        directDeliveries.credits(vendorId, PageQuery.of()).total shouldBe 1
     }
 
     @Test

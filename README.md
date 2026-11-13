@@ -48,8 +48,8 @@ Master data and base pricing (Phase 1 of the PRD), and the start of procure to p
 | `catalog` | `departments`, `units-of-measure`, `items` | `ItemCreated`, `ItemChanged`, `ItemDiscontinued`, `VendorCostChanged` |
 | `pricing` | `price-zones`, `retail-prices` | `RetailPriceScheduled`, `PriceChangeEffective` |
 | `purchasing` | `purchase-orders`, `purchasing/approval-threshold` | `PurchaseOrderApproved`, `PurchaseOrderSent`, `PurchaseOrderCancelled` |
-| `receiving` | `expected-deliveries`, `receipts` | `GoodsReceived`, `ReceiptDiscrepancyRecorded` |
-| `payables` | `payables/accruals`, `payables/accruals/balances`, `payables/invoices`, `payables/vouchers`, `payables/payment-runs`, `payables/payments` | `AccrualRecorded`, `InvoiceMatched`, `InvoiceMatchException`, `PayableVoucherReleased`, `PaymentIssued` |
+| `receiving` | `expected-deliveries`, `receipts`, `direct-deliveries`, `direct-deliveries/costs` | `GoodsReceived`, `ReceiptDiscrepancyRecorded`, `DirectDeliveryReceived` |
+| `payables` | `payables/accruals`, `payables/accruals/balances`, `payables/invoices`, `payables/vouchers`, `payables/payment-runs`, `payables/payments`, `payables/direct-delivery-accruals`, `payables/vendor-credits` | `AccrualRecorded`, `InvoiceMatched`, `InvoiceMatchException`, `PayableVoucherReleased`, `PaymentIssued` |
 | `ledger` | `ledger/accounts`, `ledger/posting-accounts`, `ledger/fiscal-periods`, `ledger/journal-entries`, `ledger/trial-balance` | `JournalEntryPosted` |
 | `inventory` | `inventory/adjustments`, `inventory/counts`, `inventory/on-hand`, `inventory/movements` | `InventoryAdjusted` |
 
@@ -65,6 +65,8 @@ Purchasing learns what each vendor supplies, and at what cost, from the catalog'
 Inventory is an append-only ledger of movements per item and location, warehouse or store, with on-hand and weighted average cost kept as its running total. Stock is counted in the item's base unit, which inventory learns from `ItemCreated`. Goods received at a warehouse dock enter stock at purchase order cost and move the average.
 
 Receiving expects every purchase order that purchasing sends. A clerk checks a delivery in against the order's lines; cases over, short, and damaged are recorded on the receipt and published as a discrepancy.
+
+Vendors that deliver straight to stores have no purchase order. A buyer agrees a cost per unit with the vendor for each store; that cost list is also what allows the vendor to deliver an item there. A store manager checks in the driver's ticket in single units, with what was delivered and what was taken back. Delivered units enter the store's stock and are accrued; returned units leave it and become a vendor credit; see [ADR 5](docs/adr/0005-direct-store-delivery-receipts.md). Matching the vendor's invoice to the ticket is not built yet.
 
 Payables accrues what is owed for each receipt at purchase order cost (goods received, not invoiced) from `GoodsReceived`, and reports the open balance and its age by vendor.
 

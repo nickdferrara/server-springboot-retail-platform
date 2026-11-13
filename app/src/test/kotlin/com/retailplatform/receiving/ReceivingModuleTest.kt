@@ -43,7 +43,7 @@ import java.util.Optional
 import java.util.function.Supplier
 
 @ApplicationModuleTest
-@Import(TestcontainersConfiguration::class)
+@Import(TestcontainersConfiguration::class, KnownStoresAndVendors::class)
 @WithMockUser(username = "clerk", authorities = [Roles.RECEIVING_CLERK])
 class ReceivingModuleTest(
     @Autowired private val receiveGoods: ReceiveGoods,

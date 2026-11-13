@@ -4,6 +4,7 @@ import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
+import com.retailplatform.ledger.application.DirectDeliveryReceivedPostingRule
 import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
 import com.retailplatform.ledger.application.PaymentIssuedPostingRule
@@ -24,10 +25,14 @@ import com.retailplatform.payables.api.events.InvoiceFacts
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.platform.security.Roles
+import com.retailplatform.receiving.api.events.DirectDeliveryFacts
+import com.retailplatform.receiving.api.events.DirectDeliveryLine
+import com.retailplatform.receiving.api.events.DirectDeliveryReceived
 import com.retailplatform.receiving.api.events.GoodsReceived
 import com.retailplatform.receiving.api.events.GoodsReceivedLine
 import com.retailplatform.receiving.api.events.ReceiptFacts
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.EventId
 import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
@@ -38,6 +43,7 @@ import com.retailplatform.shared.PaymentId
 import com.retailplatform.shared.PurchaseOrderId
 import com.retailplatform.shared.ReceiptId
 import com.retailplatform.shared.ResourceNotFound
+import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import com.retailplatform.shared.WarehouseId
 import io.kotest.assertions.throwables.shouldThrow
@@ -198,6 +204,61 @@ class LedgerModuleTest(
             listOf(PostingAccount.ACCOUNTS_PAYABLE, PostingAccount.BANK)
         PaymentIssuedPostingRule().posting(paymentIssued("0.0000", "0.0000", "0.0000")) shouldBe null
     }
+
+    @Test
+    fun `a direct store delivery posts store inventory, the accrual, and the vendor credit`(scenario: Scenario) {
+        val before = balances()
+        val event = directDelivery(DirectDeliveryLine(1, ItemId.generate(clock), 20, 3, BigDecimal("1.2500")))
+
+        scenario
+            .publish(event)
+            .andWaitForEventOfType(JournalEntryPosted::class.java)
+            .matching { it.sourceEventId == event.eventId }
+            .toArriveAndVerify { journalEntry ->
+                journalEntry.journal shouldBe "INVENTORY"
+                journalEntry.amount shouldBe BigDecimal("25.0000")
+            }
+
+        val after = balances()
+        val storeInventory = AccountNumber.of("01-1410-0000-00")
+        val accruedDirect = AccountNumber.of("01-2110-0000-00")
+        val payable = AccountNumber.of("01-2000-0000-00")
+        after.getValue(storeInventory) - before.getOrDefault(storeInventory, usd("0")) shouldBe usd("21.25")
+        after.getValue(accruedDirect) - before.getOrDefault(accruedDirect, usd("0")) shouldBe usd("-25.00")
+        after.getValue(payable) - before.getOrDefault(payable, usd("0")) shouldBe usd("3.75")
+        ledger.trialBalance(today).isBalanced shouldBe true
+
+        // A ticket that only takes product back credits store inventory against the vendor credit.
+        val rule = DirectDeliveryReceivedPostingRule()
+        val pickup =
+            rule.posting(
+                directDelivery(DirectDeliveryLine(1, ItemId.generate(clock), 0, 4, BigDecimal("2.0000"))),
+            )
+        requireNotNull(pickup).lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.STORE_INVENTORY, EntrySide.CREDIT, usd("8.00")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.DEBIT, usd("8.00")),
+            )
+        rule.posting(directDelivery(DirectDeliveryLine(1, ItemId.generate(clock), 4, 0, BigDecimal("0.0000")))) shouldBe
+            null
+    }
+
+    private fun directDelivery(vararg lines: DirectDeliveryLine) =
+        DirectDeliveryReceived(
+            eventId = EventId.generate(clock),
+            occurredAt = clock.instant(),
+            businessDate = today,
+            delivery =
+                DirectDeliveryFacts(
+                    DirectDeliveryId.generate(clock),
+                    "100088",
+                    VendorId.generate(clock),
+                    StoreId.generate(clock),
+                    "T-9",
+                ),
+            currency = "USD",
+            lines = lines.toList(),
+        )
 
     private fun paymentIssued(
         gross: String,
