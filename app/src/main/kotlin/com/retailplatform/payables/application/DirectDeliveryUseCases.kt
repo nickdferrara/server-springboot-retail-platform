@@ -12,12 +12,14 @@ import com.retailplatform.payables.domain.TicketInvoiceStatus
 import com.retailplatform.payables.domain.TicketUnitChange
 import com.retailplatform.payables.domain.VendorCredit
 import com.retailplatform.payables.domain.VendorCreditId
+import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.shared.DirectDeliveryId
 import com.retailplatform.shared.EventId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.Page
 import com.retailplatform.shared.PageQuery
+import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.VendorId
 import org.springframework.context.ApplicationEventPublisher
 import org.springframework.stereotype.Service
@@ -67,11 +69,21 @@ interface VendorCreditRepository {
 
 /** Port: where adjustments that accounting has to look at are kept. */
 interface DeliveryAdjustmentRepository {
+    /** Inserts a new adjustment or updates an existing one; a stale version is refused. */
     fun save(adjustment: DeliveryAdjustment)
 
-    /** A vendor's adjustments, the oldest first. */
+    fun findById(id: DeliveryAdjustmentId): DeliveryAdjustment?
+
+    /** Whether an adjustment for the vendor was paid against the vendor's document [reference]. */
+    fun existsReference(
+        vendorId: VendorId,
+        reference: VendorInvoiceNumber,
+    ): Boolean
+
+    /** A vendor's adjustments, the oldest first; only those still waiting if [openOnly]. */
     fun findByVendor(
         vendorId: VendorId,
+        openOnly: Boolean,
         query: PageQuery,
     ): Page<DeliveryAdjustment>
 }
@@ -284,8 +296,12 @@ class DirectDeliveryPayablesQueries(
 ) {
     fun adjustments(
         vendorId: VendorId,
+        openOnly: Boolean,
         query: PageQuery,
-    ): Page<DeliveryAdjustment> = adjustments.findByVendor(vendorId, query)
+    ): Page<DeliveryAdjustment> = adjustments.findByVendor(vendorId, openOnly, query)
+
+    fun adjustment(id: DeliveryAdjustmentId): DeliveryAdjustment =
+        adjustments.findById(id) ?: throw ResourceNotFound("Adjustment", id.toString())
 
     fun accruals(
         vendorId: VendorId,

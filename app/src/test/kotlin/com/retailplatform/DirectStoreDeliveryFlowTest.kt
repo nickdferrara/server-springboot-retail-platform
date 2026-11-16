@@ -136,6 +136,7 @@ class DirectStoreDeliveryFlowTest(
         mockMvc.get("/api/v1/payables/direct-delivery-adjustments?vendorId=$vendorId").andExpect {
             jsonPath("$.total") { value(0) }
         }
+        noAdjustmentToSettle()
         mockMvc.get("/api/v1/ledger/trial-balance?asOf=$today").andExpect { jsonPath("$.balanced") { value(true) } }
     }
 
@@ -344,6 +345,18 @@ class DirectStoreDeliveryFlowTest(
                 jsonPath("$.code") { value("payables.override-by-invoice-creator") }
             }
         }
+    }
+
+    /** Nothing was corrected after its invoice matched, so there is no adjustment to pay or write off. */
+    private fun noAdjustmentToSettle() {
+        val missing = "/api/v1/payables/direct-delivery-adjustments/${java.util.UUID.randomUUID()}"
+        mockMvc.get(missing).andExpect { status { isNotFound() } }
+        post("$missing/write-off", """{"reason": "Vendor will not bill"}""").andExpect { status { isNotFound() } }
+        post("$missing/pay", """{"reason": "Vendor billed it"}""").andExpect { status { isBadRequest() } }
+        post(
+            "$missing/pay",
+            """{"reason": "Vendor billed it", "vendorReference": "DM-1", "referenceDate": "2026-11-16"}""",
+        ).andExpect { status { isNotFound() } }
     }
 
     private fun post(

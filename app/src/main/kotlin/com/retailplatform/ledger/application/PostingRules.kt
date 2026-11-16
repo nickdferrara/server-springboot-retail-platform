@@ -4,6 +4,7 @@ import com.retailplatform.ledger.domain.EntrySide
 import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
+import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.InvoiceMatched
@@ -245,4 +246,36 @@ class DirectDeliveryCorrectionPostingRule : PostingRule<DirectDeliveryCorrection
             amount.isPositive -> PostingLine(role, side, amount)
             else -> PostingLine(role, if (side == EntrySide.DEBIT) EntrySide.CREDIT else EntrySide.DEBIT, -amount)
         }
+}
+
+/**
+ * A direct delivery adjustment was settled: debit accrued direct delivery payables for the amount, and credit
+ * accounts payable when the vendor is to be paid, or purchase price variance when the amount is written off.
+ */
+@Component
+class DirectDeliveryAdjustmentResolvedPostingRule : PostingRule<DirectDeliveryAdjustmentResolved> {
+    override fun posting(event: DirectDeliveryAdjustmentResolved): Posting? {
+        val amount = Money.of(event.amount, Currency.getInstance(event.currency))
+        if (amount.isZero) return null
+        val paid = event.resolution == PAID
+        val credited = if (paid) PostingAccount.ACCOUNTS_PAYABLE else PostingAccount.PURCHASE_PRICE_VARIANCE
+
+        return Posting(
+            journal = Journal.PURCHASES,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Adjustment on ticket ${event.ticketNumber}"),
+            description =
+                "Direct delivery adjustment on ticket ${event.ticketNumber} " +
+                    if (paid) "to be paid" else "written off",
+            lines =
+                listOf(
+                    PostingLine(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, amount),
+                    PostingLine(credited, EntrySide.CREDIT, amount),
+                ),
+        )
+    }
+
+    private companion object {
+        const val PAID = "PAID"
+    }
 }

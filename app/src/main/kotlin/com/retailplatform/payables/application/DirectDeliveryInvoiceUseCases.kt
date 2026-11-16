@@ -174,7 +174,7 @@ class TicketInvoiceMatching(
 @Service
 class EnterDirectDeliveryInvoice(
     private val invoices: DirectDeliveryInvoiceRepository,
-    private val vendorInvoices: VendorInvoiceRepository,
+    private val documentNumbers: VendorDocumentNumbers,
     private val matching: TicketInvoiceMatching,
     private val currentUser: CurrentUser,
     private val clock: Clock,
@@ -187,8 +187,7 @@ class EnterDirectDeliveryInvoice(
     @Transactional
     fun handle(details: TicketInvoiceDetails): InvoiceId {
         if (invoices.existsFor(details.ticket)) throw TicketAlreadyInvoiced(details.ticket.ticketNumber)
-        val vendorId = details.ticket.vendorId
-        if (invoices.exists(vendorId, details.number) || vendorInvoices.exists(vendorId, details.number)) {
+        if (documentNumbers.isUsed(details.ticket.vendorId, details.number)) {
             throw InvoiceAlreadyEntered(details.number)
         }
 

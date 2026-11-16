@@ -8,6 +8,7 @@ import com.retailplatform.shared.StoreId
 import com.retailplatform.shared.VendorId
 import java.math.BigDecimal
 import java.time.Instant
+import java.util.UUID
 
 /** The vendor invoice for one direct store delivery ticket that an event is about. */
 data class DirectDeliveryInvoiceFacts(
@@ -78,5 +79,26 @@ data class DirectDeliveryCorrectionRecorded(
     val accrualChange: BigDecimal,
     val creditChange: BigDecimal,
     val currency: String,
+    val schemaVersion: Int = 1,
+)
+
+/**
+ * Accounting settled an amount that a late correction to a store's receipt had left accrued with no invoice to
+ * match it. [resolution] is `PAID` when the vendor is owed [amount] and a voucher was released for it against the
+ * vendor's document [vendorReference], or `WRITTEN_OFF` when it is not owed and leaves what is accrued as a
+ * favourable variance; [vendorReference] is then `null`. [businessDate] is the day it was settled.
+ */
+data class DirectDeliveryAdjustmentResolved(
+    val eventId: EventId,
+    val occurredAt: Instant,
+    val businessDate: BusinessDate,
+    val adjustmentId: UUID,
+    val vendorId: VendorId,
+    val storeId: StoreId,
+    val ticketNumber: String,
+    val resolution: String,
+    val amount: BigDecimal,
+    val currency: String,
+    val vendorReference: String?,
     val schemaVersion: Int = 1,
 )

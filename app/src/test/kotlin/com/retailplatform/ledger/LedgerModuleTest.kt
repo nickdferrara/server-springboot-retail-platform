@@ -4,6 +4,7 @@ import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
+import com.retailplatform.ledger.application.DirectDeliveryAdjustmentResolvedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryCorrectionPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryInvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryReceivedPostingRule
@@ -23,6 +24,7 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.JournalEntryUnbalanced
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
+import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceFacts
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
@@ -67,6 +69,7 @@ import org.springframework.transaction.TransactionException
 import org.springframework.transaction.support.TransactionTemplate
 import java.math.BigDecimal
 import java.time.Clock
+import java.util.UUID
 
 @ApplicationModuleTest
 @Import(TestcontainersConfiguration::class)
@@ -310,6 +313,40 @@ class LedgerModuleTest(
                 Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("14.25")),
                 Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("18.75")),
             )
+    }
+
+    @Test
+    fun `a settled direct delivery adjustment leaves the accrual for accounts payable or the variance`() {
+        val rule = DirectDeliveryAdjustmentResolvedPostingRule()
+        val paid =
+            DirectDeliveryAdjustmentResolved(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                adjustmentId = UUID.randomUUID(),
+                vendorId = VendorId.generate(clock),
+                storeId = StoreId.generate(clock),
+                ticketNumber = "T-85",
+                resolution = "PAID",
+                amount = BigDecimal("4.0000"),
+                currency = "USD",
+                vendorReference = "DM-85",
+            )
+
+        val toPay = requireNotNull(rule.posting(paid))
+        toPay.journal shouldBe Journal.PURCHASES
+        toPay.lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, usd("4.00")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("4.00")),
+            )
+        val writtenOff = paid.copy(resolution = "WRITTEN_OFF", vendorReference = null)
+        requireNotNull(rule.posting(writtenOff)).lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, usd("4.00")),
+                Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("4.00")),
+            )
+        rule.posting(paid.copy(amount = BigDecimal("0.0000"))) shouldBe null
     }
 
     /** An invoice for 25.20 matched against 25.00 accrued. */

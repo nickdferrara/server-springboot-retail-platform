@@ -322,7 +322,7 @@ class DirectDeliveryPayablesModuleTest(
             .single()
             .amount shouldBe usd("25.00")
         credit(vendorId).amount shouldBe usd("2.50")
-        directDeliveries.adjustments(vendorId, PageQuery.of()).total shouldBe 0
+        directDeliveries.adjustments(vendorId, false, PageQuery.of()).total shouldBe 0
     }
 
     @Test
@@ -377,7 +377,7 @@ class DirectDeliveryPayablesModuleTest(
         newCredit.amount shouldBe usd("7.50")
         newCredit.lines.single().units shouldBe 6
         newCredit.ticket.receiptNumber shouldBe "100092"
-        val adjustment = directDeliveries.adjustments(vendorId, PageQuery.of()).items.single()
+        val adjustment = directDeliveries.adjustments(vendorId, false, PageQuery.of()).items.single()
         adjustment.kind shouldBe DeliveryAdjustmentKind.RECEIVED_AFTER_INVOICE
         adjustment.amount shouldBe usd("4.00")
         directDeliveries
@@ -405,7 +405,7 @@ class DirectDeliveryPayablesModuleTest(
 
         credit(vendorId).id shouldBe creditId
         credit(vendorId).amount shouldBe usd("5.00")
-        val adjustment = directDeliveries.adjustments(vendorId, PageQuery.of()).items.single()
+        val adjustment = directDeliveries.adjustments(vendorId, false, PageQuery.of()).items.single()
         adjustment.kind shouldBe DeliveryAdjustmentKind.RETURN_REVERSED_AFTER_CREDIT_USED
         adjustment.amount shouldBe usd("1.25")
         cancelPaymentRun.handle(runId)
