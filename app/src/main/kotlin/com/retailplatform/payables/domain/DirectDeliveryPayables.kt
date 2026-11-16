@@ -1,7 +1,11 @@
 package com.retailplatform.payables.domain
 
+import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.BusinessRuleViolation
 import com.retailplatform.shared.DirectDeliveryId
+import com.retailplatform.shared.EventId
+import com.retailplatform.shared.InvoiceId
 import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.Money
 import com.retailplatform.shared.PaymentId
@@ -261,13 +265,112 @@ enum class DeliveryAdjustmentKind {
     RETURN_REVERSED_AFTER_CREDIT_USED,
 }
 
+/** How accounting settled an adjustment, on [resolvedOn]; [decision] says who decided and why. */
+sealed interface AdjustmentResolution {
+    /** A short name for the resolution, stored and shown to users. */
+    val code: String
+    val resolvedOn: BusinessDate
+    val decision: MatchOverride
+
+    /**
+     * The vendor is owed the amount and billed it on its document [reference], dated [referenceDate]; a voucher
+     * was released for it.
+     */
+    data class Paid(
+        override val resolvedOn: BusinessDate,
+        override val decision: MatchOverride,
+        val reference: VendorInvoiceNumber,
+        val referenceDate: BusinessDate,
+    ) : AdjustmentResolution {
+        override val code = "PAID"
+    }
+
+    /** The amount is not owed: it was released from what is accrued as a favourable variance. */
+    data class WrittenOff(
+        override val resolvedOn: BusinessDate,
+        override val decision: MatchOverride,
+    ) : AdjustmentResolution {
+        override val code = "WRITTEN_OFF"
+    }
+}
+
 /**
  * An amount owed to a vendor that a late correction to a store's receipt brought to light. It is accrued, but no
- * invoice will match it and no payment run will pay it: accounting settles it with the vendor.
+ * invoice will match it: accounting settles it with the vendor, once and whole, by paying it or writing it off.
+ * [resolution] is `null` while it waits.
  */
 data class DeliveryAdjustment(
     val id: DeliveryAdjustmentId,
     val ticket: DeliveredTicket,
     val kind: DeliveryAdjustmentKind,
     val amount: Money,
-)
+    val resolution: AdjustmentResolution? = null,
+    val version: Int = 0,
+) {
+    /** Whether the adjustment still waits for accounting. */
+    val isOpen: Boolean get() = resolution == null
+
+    /** A short name for where the adjustment stands, stored and shown to users. */
+    val statusCode: String get() = resolution?.code ?: OPEN
+
+    /**
+     * The adjustment settled as [resolution] says.
+     *
+     * @throws AdjustmentAlreadyResolved if it was settled before.
+     */
+    fun resolve(resolution: AdjustmentResolution): DeliveryAdjustment {
+        if (!isOpen) throw AdjustmentAlreadyResolved(ticket.ticketNumber)
+        return copy(resolution = resolution)
+    }
+
+    /**
+     * The adjustment as a voucher needs it: the vendor's document stands in for an invoice.
+     *
+     * @throws IllegalStateException unless the adjustment was resolved by paying it.
+     */
+    fun payable(): MatchedInvoice {
+        val paid = resolution as? AdjustmentResolution.Paid ?: error("Adjustment $id is not to be paid")
+        val document =
+            VoucheredInvoice(
+                InvoiceId.of(id.value),
+                paid.reference,
+                ticket.vendorId,
+                purchaseOrderId = null,
+                paid.referenceDate,
+            )
+        return MatchedInvoice(document, amount, paid.resolvedOn, paid.decision.approvedBy)
+    }
+
+    /**
+     * The event that tells the ledger the adjustment was settled.
+     *
+     * @throws IllegalStateException while the adjustment waits.
+     */
+    fun resolved(clock: Clock): DirectDeliveryAdjustmentResolved {
+        val settled = checkNotNull(resolution) { "Adjustment $id has not been resolved" }
+        return DirectDeliveryAdjustmentResolved(
+            eventId = EventId.generate(clock),
+            occurredAt = clock.instant(),
+            businessDate = settled.resolvedOn,
+            adjustmentId = id.value,
+            vendorId = ticket.vendorId,
+            storeId = ticket.storeId,
+            ticketNumber = ticket.ticketNumber,
+            resolution = settled.code,
+            amount = amount.amount,
+            currency = amount.currency.currencyCode,
+            vendorReference = (settled as? AdjustmentResolution.Paid)?.reference?.value,
+        )
+    }
+
+    companion object {
+        const val OPEN = "OPEN"
+    }
+}
+
+class AdjustmentAlreadyResolved(
+    ticketNumber: String,
+) : BusinessRuleViolation(
+        "payables.adjustment-already-resolved",
+        "The adjustment on ticket $ticketNumber has already been paid or written off",
+    )

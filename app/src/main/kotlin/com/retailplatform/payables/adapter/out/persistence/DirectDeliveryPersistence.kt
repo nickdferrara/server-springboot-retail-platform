@@ -3,17 +3,20 @@ package com.retailplatform.payables.adapter.out.persistence
 import com.retailplatform.payables.application.DeliveryAdjustmentRepository
 import com.retailplatform.payables.application.DirectDeliveryAccrualRepository
 import com.retailplatform.payables.application.VendorCreditRepository
+import com.retailplatform.payables.domain.AdjustmentResolution
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DeliveryAdjustmentId
 import com.retailplatform.payables.domain.DeliveryAdjustmentKind
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.PaymentRunId
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.VendorCredit
 import com.retailplatform.payables.domain.VendorCreditId
 import com.retailplatform.payables.domain.VendorCreditStatus
+import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.platform.persistence.AuditMetadata
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.DirectDeliveryId
@@ -331,6 +334,12 @@ data class DeliveryAdjustmentEntity(
     val kind: String,
     val amount: BigDecimal,
     val currency: String,
+    val status: String,
+    val resolvedOn: LocalDate?,
+    val resolvedBy: String?,
+    val resolutionReason: String?,
+    val vendorReference: String?,
+    val referenceDate: LocalDate?,
     @Version val version: Int = 0,
     @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
 )
@@ -338,15 +347,28 @@ data class DeliveryAdjustmentEntity(
 interface DeliveryAdjustmentJdbcRepository : CrudRepository<DeliveryAdjustmentEntity, UUID> {
     @Query(
         "SELECT * FROM payables.direct_delivery_adjustment WHERE vendor_id = :vendorId " +
-            "ORDER BY recorded_on, id LIMIT :limit OFFSET :offset",
+            "AND (NOT :openOnly OR status = 'OPEN') ORDER BY recorded_on, id LIMIT :limit OFFSET :offset",
     )
     fun findByVendor(
         vendorId: UUID,
+        openOnly: Boolean,
         limit: Int,
         offset: Long,
     ): List<DeliveryAdjustmentEntity>
 
-    fun countByVendorId(vendorId: UUID): Long
+    @Query(
+        "SELECT count(*) FROM payables.direct_delivery_adjustment WHERE vendor_id = :vendorId " +
+            "AND (NOT :openOnly OR status = 'OPEN')",
+    )
+    fun countByVendor(
+        vendorId: UUID,
+        openOnly: Boolean,
+    ): Long
+
+    fun existsByVendorIdAndVendorReference(
+        vendorId: UUID,
+        vendorReference: String,
+    ): Boolean
 }
 
 @Repository
@@ -354,7 +376,16 @@ class JdbcDeliveryAdjustmentRepository(
     private val adjustments: DeliveryAdjustmentJdbcRepository,
 ) : DeliveryAdjustmentRepository {
     override fun save(adjustment: DeliveryAdjustment) {
+        // An update keeps the stored creation stamp; the version check refuses a stale write.
+        val audit =
+            if (adjustment.version == 0) {
+                AuditMetadata()
+            } else {
+                adjustments.findById(adjustment.id.value).orElseThrow().audit
+            }
         val ticket = adjustment.ticket
+        val resolution = adjustment.resolution
+        val paid = resolution as? AdjustmentResolution.Paid
         adjustments.save(
             DeliveryAdjustmentEntity(
                 id = adjustment.id.value,
@@ -367,33 +398,68 @@ class JdbcDeliveryAdjustmentRepository(
                 kind = adjustment.kind.name,
                 amount = adjustment.amount.amount,
                 currency = adjustment.amount.currency.currencyCode,
+                status = adjustment.statusCode,
+                resolvedOn = resolution?.resolvedOn?.value,
+                resolvedBy = resolution?.decision?.approvedBy,
+                resolutionReason = resolution?.decision?.reason,
+                vendorReference = paid?.reference?.value,
+                referenceDate = paid?.referenceDate?.value,
+                version = adjustment.version,
+                audit = audit,
             ),
         )
     }
 
+    override fun findById(id: DeliveryAdjustmentId): DeliveryAdjustment? =
+        adjustments.findById(id.value).getOrNull()?.toDomain()
+
+    override fun existsReference(
+        vendorId: VendorId,
+        reference: VendorInvoiceNumber,
+    ): Boolean = adjustments.existsByVendorIdAndVendorReference(vendorId.value, reference.value)
+
     override fun findByVendor(
         vendorId: VendorId,
+        openOnly: Boolean,
         query: PageQuery,
     ): Page<DeliveryAdjustment> =
         Page(
-            adjustments.findByVendor(vendorId.value, query.size, query.offset).map {
-                DeliveryAdjustment(
-                    id = DeliveryAdjustmentId.of(it.id),
-                    ticket =
-                        DeliveredTicket(
-                            DirectDeliveryId.of(it.deliveryId),
-                            it.receiptNumber,
-                            VendorId.of(it.vendorId),
-                            StoreId.of(it.storeId),
-                            it.ticketNumber,
-                            BusinessDate(it.recordedOn),
-                        ),
-                    kind = DeliveryAdjustmentKind.valueOf(it.kind),
-                    amount = Money.of(it.amount, Currency.getInstance(it.currency)),
-                )
-            },
+            adjustments.findByVendor(vendorId.value, openOnly, query.size, query.offset).map { it.toDomain() },
             query.page,
             query.size,
-            adjustments.countByVendorId(vendorId.value),
+            adjustments.countByVendor(vendorId.value, openOnly),
         )
+
+    private fun DeliveryAdjustmentEntity.toDomain() =
+        DeliveryAdjustment(
+            id = DeliveryAdjustmentId.of(id),
+            ticket =
+                DeliveredTicket(
+                    DirectDeliveryId.of(deliveryId),
+                    receiptNumber,
+                    VendorId.of(vendorId),
+                    StoreId.of(storeId),
+                    ticketNumber,
+                    BusinessDate(recordedOn),
+                ),
+            kind = DeliveryAdjustmentKind.valueOf(kind),
+            amount = Money.of(amount, Currency.getInstance(currency)),
+            resolution = resolution(),
+            version = version,
+        )
+
+    private fun DeliveryAdjustmentEntity.resolution(): AdjustmentResolution? {
+        if (resolvedOn == null || resolvedBy == null || resolutionReason == null) return null
+        val decision = MatchOverride.of(resolvedBy, resolutionReason)
+        return if (vendorReference != null && referenceDate != null) {
+            AdjustmentResolution.Paid(
+                BusinessDate(resolvedOn),
+                decision,
+                VendorInvoiceNumber.of(vendorReference),
+                BusinessDate(referenceDate),
+            )
+        } else {
+            AdjustmentResolution.WrittenOff(BusinessDate(resolvedOn), decision)
+        }
+    }
 }

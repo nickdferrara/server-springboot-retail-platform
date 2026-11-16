@@ -89,7 +89,7 @@ class InvoiceMatching(
 /** Use case: enter a vendor's invoice and match it against its purchase order and receipts. */
 @Service
 class EnterVendorInvoice(
-    private val invoices: VendorInvoiceRepository,
+    private val documentNumbers: VendorDocumentNumbers,
     private val matching: InvoiceMatching,
     private val currentUser: CurrentUser,
     private val clock: Clock,
@@ -97,7 +97,7 @@ class EnterVendorInvoice(
     @RequiresRole(Roles.ACCOUNTING_CLERK)
     @Transactional
     fun handle(details: InvoiceDetails): InvoiceId {
-        if (invoices.exists(details.vendorId, details.number)) throw InvoiceAlreadyEntered(details.number)
+        if (documentNumbers.isUsed(details.vendorId, details.number)) throw InvoiceAlreadyEntered(details.number)
 
         val invoice = VendorInvoice.enter(details, currentUser.name, clock)
         matching.match(invoice)

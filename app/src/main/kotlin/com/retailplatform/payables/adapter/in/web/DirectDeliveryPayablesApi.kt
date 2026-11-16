@@ -1,6 +1,7 @@
 package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
+import com.retailplatform.payables.domain.AdjustmentResolution
 import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DirectDeliveryAccrual
@@ -90,6 +91,12 @@ data class DeliveryAdjustmentResponse(
     val recordedOn: LocalDate,
     val kind: String,
     val amount: MoneyDto,
+    val status: String,
+    val resolvedOn: LocalDate?,
+    val resolvedBy: String?,
+    val resolutionReason: String?,
+    val vendorReference: String?,
+    val referenceDate: LocalDate?,
 ) {
     companion object {
         fun from(adjustment: DeliveryAdjustment) =
@@ -103,6 +110,12 @@ data class DeliveryAdjustmentResponse(
                 recordedOn = adjustment.ticket.receivedOn.value,
                 kind = adjustment.kind.name,
                 amount = MoneyDto.from(adjustment.amount),
+                status = adjustment.statusCode,
+                resolvedOn = adjustment.resolution?.resolvedOn?.value,
+                resolvedBy = adjustment.resolution?.decision?.approvedBy,
+                resolutionReason = adjustment.resolution?.decision?.reason,
+                vendorReference = (adjustment.resolution as? AdjustmentResolution.Paid)?.reference?.value,
+                referenceDate = (adjustment.resolution as? AdjustmentResolution.Paid)?.referenceDate?.value,
             )
     }
 }
@@ -136,15 +149,18 @@ class DirectDeliveryPayablesController(
 
     /**
      * Amounts owed to a vendor that a late correction to a store's receipt brought to light, the oldest first.
-     * Nothing matches or pays them; accounting settles them with the vendor.
+     * No invoice matches them; accounting pays each or writes it off. Only those still waiting with
+     * `openOnly=true`.
      */
     @GetMapping("/direct-delivery-adjustments")
     fun adjustments(
         @RequestParam vendorId: String,
+        @RequestParam(defaultValue = "false") openOnly: Boolean,
         @RequestParam(required = false) page: Int?,
         @RequestParam(required = false) size: Int?,
     ): PageResponse<DeliveryAdjustmentResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
-        return PageResponse.from(queries.adjustments(vendor, pageQuery(page, size)), DeliveryAdjustmentResponse::from)
+        val found = queries.adjustments(vendor, openOnly, pageQuery(page, size))
+        return PageResponse.from(found, DeliveryAdjustmentResponse::from)
     }
 }
