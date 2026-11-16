@@ -253,24 +253,7 @@ class LedgerModuleTest(
         scenario: Scenario,
     ) {
         val before = balances()
-        val event =
-            DirectDeliveryInvoiceMatched(
-                eventId = EventId.generate(clock),
-                occurredAt = clock.instant(),
-                businessDate = today,
-                invoice =
-                    DirectDeliveryInvoiceFacts(
-                        InvoiceId.generate(clock),
-                        "DSD-77",
-                        VendorId.generate(clock),
-                        StoreId.generate(clock),
-                        "T-77",
-                    ),
-                invoiceAmount = BigDecimal("25.2000"),
-                accruedAmount = BigDecimal("25.0000"),
-                costVariance = BigDecimal("0.2000"),
-                currency = "USD",
-            )
+        val event = directDeliveryInvoiceMatched()
 
         scenario
             .publish(event)
@@ -307,6 +290,47 @@ class LedgerModuleTest(
         requireNotNull(PaymentIssuedPostingRule().posting(withCredit)).lines.map { it.role to it.amount } shouldBe
             listOf(PostingAccount.ACCOUNTS_PAYABLE to usd("20.00"), PostingAccount.BANK to usd("20.00"))
     }
+
+    @Test
+    fun `an invoice accepted under-billed credits what was never billed to purchase price variance`() {
+        val underBilled =
+            directDeliveryInvoiceMatched().copy(
+                invoiceAmount = BigDecimal("18.7500"),
+                accruedAmount = BigDecimal("33.0000"),
+                costVariance = BigDecimal("-14.2500"),
+                unbilledAmount = BigDecimal("14.2500"),
+            )
+
+        // The whole accrual is relieved; accounts payable is credited only for what the invoice bills.
+        requireNotNull(
+            DirectDeliveryInvoiceMatchedPostingRule().posting(underBilled),
+        ).lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, usd("33.00")),
+                Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("14.25")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("18.75")),
+            )
+    }
+
+    /** An invoice for 25.20 matched against 25.00 accrued. */
+    private fun directDeliveryInvoiceMatched() =
+        DirectDeliveryInvoiceMatched(
+            eventId = EventId.generate(clock),
+            occurredAt = clock.instant(),
+            businessDate = today,
+            invoice =
+                DirectDeliveryInvoiceFacts(
+                    InvoiceId.generate(clock),
+                    "DSD-77",
+                    VendorId.generate(clock),
+                    StoreId.generate(clock),
+                    "T-77",
+                ),
+            invoiceAmount = BigDecimal("25.2000"),
+            accruedAmount = BigDecimal("25.0000"),
+            costVariance = BigDecimal("0.2000"),
+            currency = "USD",
+        )
 
     @Test
     fun `a corrected direct delivery moves inventory, the accrual, and the vendor credit by what changed`() {

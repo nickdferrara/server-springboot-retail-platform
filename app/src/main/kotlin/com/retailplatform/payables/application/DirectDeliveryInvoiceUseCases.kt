@@ -12,6 +12,7 @@ import com.retailplatform.payables.domain.TicketAlreadyInvoiced
 import com.retailplatform.payables.domain.TicketInvoiceDetails
 import com.retailplatform.payables.domain.TicketMatchOutcome
 import com.retailplatform.payables.domain.TwoWayMatch
+import com.retailplatform.payables.domain.UnderBillingNotAcceptable
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.platform.security.CurrentUser
 import com.retailplatform.platform.security.RequiresRole
@@ -67,9 +68,12 @@ class TicketInvoiceMatching(
     private val clock: Clock,
 ) {
     /**
-     * With [override], a unit cost outside tolerance is accepted.
+     * With [override], a unit cost outside tolerance is accepted, now and when the invoice is matched again. An
+     * override is also taken when all that is left is under-billing, which is accounting's to accept; the
+     * invoice then stays in exception with its price accepted.
      *
-     * @throws OverrideDoesNotResolve if the invoice still does not match with its price accepted.
+     * @throws OverrideDoesNotResolve if accepting the price neither matches the invoice nor leaves only
+     * under-billing, or if its price was accepted before.
      */
     fun match(
         invoice: DirectDeliveryInvoice,
@@ -77,8 +81,9 @@ class TicketInvoiceMatching(
     ) {
         invoice.requireMatchable(override)
         val accrual = accruals.findFor(invoice.details.ticket)
-        val outcome = twoWayMatch().match(invoice, accrual, acceptPrice = override != null)
-        if (override != null && outcome is TicketMatchOutcome.Exceptions) {
+        val acceptPrice = override != null || invoice.priceAcceptance != null
+        val outcome = twoWayMatch().match(invoice, accrual, acceptPrice)
+        if (override != null && outcome is TicketMatchOutcome.Exceptions && !onlyPriceHoldsUp(invoice, accrual)) {
             throw OverrideDoesNotResolve(invoice.details.number)
         }
 
@@ -105,6 +110,41 @@ class TicketInvoiceMatching(
         invoices.save(invoice)
         payable(invoice, checkNotNull(accrual))
         invoice.releaseEvents().forEach(events::publishEvent)
+    }
+
+    /**
+     * Accepts [invoice] as billed though it bills less than the store received, on the word of [approval]. The
+     * ticket is closed: nothing more is owed for the units received and not billed.
+     *
+     * @throws UnderBillingNotAcceptable if the invoice bills more than was received on any line, bills everything,
+     * or has a price outside tolerance that no buyer has accepted.
+     */
+    fun acceptUnderBilling(
+        invoice: DirectDeliveryInvoice,
+        approval: MatchOverride,
+    ) {
+        invoice.requireMatchable(approval)
+        val accrual = accruals.findFor(invoice.details.ticket)
+        val underBilling = twoWayMatch().underBilling(invoice, accrual, invoice.priceAcceptance != null)
+
+        invoice.acceptUnderBilling(underBilling, approval, clock)
+        invoices.save(invoice)
+        payable(invoice, checkNotNull(accrual))
+        invoice.releaseEvents().forEach(events::publishEvent)
+    }
+
+    /**
+     * Whether a price outside tolerance, not yet accepted, is all that keeps accounting from accepting [invoice]
+     * as under-billed.
+     */
+    private fun onlyPriceHoldsUp(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual?,
+    ): Boolean {
+        val match = twoWayMatch()
+        return invoice.priceAcceptance == null &&
+            match.underBillingRefusal(invoice, accrual, priceAccepted = false) != null &&
+            match.underBillingRefusal(invoice, accrual, priceAccepted = true) == null
     }
 
     /** The invoice is payable: its ticket's accrual is relieved and its voucher released. */
@@ -171,7 +211,8 @@ class RematchDirectDeliveryInvoice(
 /**
  * Use case: accept a direct delivery invoice whose unit cost is outside tolerance. The approver is a buyer who
  * may approve, other than the person who entered the invoice, and says why. The whole difference from agreed
- * cost goes to the cost variance.
+ * cost goes to the cost variance. If the invoice also bills less than the store received, it keeps waiting, with
+ * its price accepted, for accounting to accept the under-billing.
  */
 @Service
 class OverrideDirectDeliveryException(
@@ -209,6 +250,28 @@ class ShortPayDirectDeliveryInvoice(
     ) {
         val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
         matching.shortPay(invoice, MatchOverride.of(currentUser.name, reason))
+    }
+}
+
+/**
+ * Use case: accept a direct delivery invoice that bills less than the store received. When no line bills more
+ * than was received, an accounting manager other than the person who entered the invoice accepts it as billed
+ * and says why. The invoice is paid in full, the ticket is closed, and the units never billed are not owed.
+ */
+@Service
+class AcceptUnderBilledDirectDeliveryInvoice(
+    private val invoices: DirectDeliveryInvoiceRepository,
+    private val matching: TicketInvoiceMatching,
+    private val currentUser: CurrentUser,
+) {
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        invoiceId: InvoiceId,
+        reason: String,
+    ) {
+        val invoice = invoices.findById(invoiceId) ?: throw ResourceNotFound("Invoice", invoiceId.toString())
+        matching.acceptUnderBilling(invoice, MatchOverride.of(currentUser.name, reason))
     }
 }
 

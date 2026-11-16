@@ -177,6 +177,85 @@ class TwoWayMatchTest {
     }
 
     @Test
+    fun `an under-billed invoice is accepted as billed and leaves the rest of the ticket unbilled`() {
+        val accrual = accrual(line(cola, 20, "1.25"), line(chips, 10, "0.80"))
+        // Bills 15 colas where 20 came, and none of the 10 chips.
+        val invoice = invoice(line(cola, 15, "1.26"))
+        val approval = MatchOverride.of("manager", "Vendor confirmed it will not bill the rest")
+
+        val underBilling = match.underBilling(invoice, accrual)
+        shouldThrow<OverrideByInvoiceCreator> {
+            invoice.acceptUnderBilling(underBilling, MatchOverride.of("clerk", "Mine"), clock)
+        }
+        invoice.acceptUnderBilling(underBilling, approval, clock)
+
+        // 5 colas at 1.25 and 10 chips at 0.80 were received and are not billed.
+        underBilling shouldBe UnderBilling(usd("14.25"), usd("33.00"))
+        invoice.status shouldBe TicketInvoiceStatus.UnderBilled(today, approval, usd("14.25"))
+        val event = invoice.releaseEvents().single().shouldBeInstanceOf<DirectDeliveryInvoiceMatched>()
+        event.invoiceAmount shouldBe BigDecimal("18.9000")
+        event.deductionAmount shouldBe BigDecimal.ZERO
+        event.unbilledAmount shouldBe BigDecimal("14.2500")
+        event.accruedAmount shouldBe BigDecimal("33.0000")
+        event.costVariance shouldBe BigDecimal("-14.1000")
+        val voucher = invoice.matched()
+        voucher.amount shouldBe usd("18.90")
+        voucher.overrideApprovedBy shouldBe "manager"
+        shouldThrow<InvoiceAlreadyMatched> { invoice.acceptUnderBilling(underBilling, approval, clock) }
+    }
+
+    @Test
+    fun `under-billing is not accepted without a receipt, over a price, or when a line bills more or all`() {
+        val accrual = accrual(line(cola, 20, "1.25"), line(chips, 10, "0.80"))
+
+        shouldThrow<UnderBillingNotAcceptable> { match.underBilling(invoice(line(cola, 15, "1.25")), null) }
+        shouldThrow<UnderBillingNotAcceptable> {
+            match.underBilling(invoice(line(cola, 20, "1.25"), line(chips, 10, "0.80")), accrual)
+        }
+        shouldThrow<UnderBillingNotAcceptable> {
+            match.underBilling(invoice(line(cola, 21, "1.25"), line(chips, 5, "0.80")), accrual)
+        }
+        shouldThrow<UnderBillingNotAcceptable> {
+            match.underBilling(invoice(line(cola, 15, "1.25"), line(ItemId.generate(clock), 1, "2.00")), accrual)
+        }
+        shouldThrow<UnderBillingNotAcceptable> {
+            match.underBilling(invoice(TicketAmountLine.of(cola, 15, Money.of("1.25", "CAD"))), accrual, true)
+        }
+        val relieved = accrual(line(cola, 20, "1.25")).also { it.relieve(today) }
+        shouldThrow<UnderBillingNotAcceptable> { match.underBilling(invoice(line(cola, 15, "1.25")), relieved) }
+
+        // A price outside tolerance is refused until a buyer has accepted it; the acceptance stays with the
+        // invoice while it waits and when it is accepted as under-billed.
+        val overpriced = invoice(line(cola, 15, "1.40"))
+        shouldThrow<UnderBillingNotAcceptable> { match.underBilling(overpriced, accrual) }
+        val buyer = MatchOverride.of("approver", "New price list not loaded yet")
+        val waiting = match.match(overpriced, accrual, acceptPrice = true)
+        overpriced.record(waiting, clock, buyer)
+        overpriced.priceAcceptance shouldBe buyer
+        overpriced.status
+            .shouldBeInstanceOf<TicketInvoiceStatus.Exception>()
+            .exceptions
+            .map { it.reason } shouldBe
+            listOf(TicketExceptionReason.QUANTITY_DIFFERS, TicketExceptionReason.ITEM_NOT_BILLED)
+        val approval = MatchOverride.of("manager", "Vendor will not bill the rest")
+        overpriced.acceptUnderBilling(match.underBilling(overpriced, accrual, priceAccepted = true), approval, clock)
+        overpriced.status shouldBe TicketInvoiceStatus.UnderBilled(today, approval, usd("14.25"), buyer)
+    }
+
+    @Test
+    fun `a price accepted while an invoice waits is kept when the invoice later matches`() {
+        val buyer = MatchOverride.of("approver", "New price list not loaded yet")
+        val invoice = invoice(line(cola, 15, "1.40"))
+        invoice.record(match.match(invoice, accrual(line(cola, 20, "1.25")), acceptPrice = true), clock, buyer)
+
+        // The store corrects its receipt to 15: the invoice matches at the price the buyer accepted.
+        invoice.record(match.match(invoice, accrual(line(cola, 15, "1.25")), acceptPrice = true), clock)
+
+        invoice.status shouldBe TicketInvoiceStatus.Matched(today, buyer)
+        invoice.priceAcceptance shouldBe null
+    }
+
+    @Test
     fun `an invoice bills each item once, in one currency`() {
         shouldThrow<InvoiceLineRepeated> { invoice(line(cola, 1, "1.00"), line(cola, 2, "1.00")) }
         shouldThrow<InvoiceInMixedCurrencies> {

@@ -80,9 +80,28 @@ sealed interface TicketInvoiceStatus {
         override val code = "SHORT_PAID"
     }
 
-    /** Did not agree, for [exceptions]; waiting for a buyer to resolve it. */
+    /**
+     * Accepted as billed on [matchedOn] though it bills fewer units than the store received, with no line that
+     * bills more. [unbilled] is what the units received and never billed were accrued at; the ticket is closed
+     * and they are not owed. [approval] says who decided and why, and [priceAcceptance] is set when a buyer
+     * accepted a unit cost outside tolerance first.
+     */
+    data class UnderBilled(
+        val matchedOn: BusinessDate,
+        val approval: MatchOverride,
+        val unbilled: Money,
+        val priceAcceptance: MatchOverride? = null,
+    ) : TicketInvoiceStatus {
+        override val code = "UNDER_BILLED"
+    }
+
+    /**
+     * Did not agree, for [exceptions]; waiting for someone to resolve it. [priceAcceptance] is set when a buyer
+     * accepted a unit cost outside tolerance and what is left is for accounting to decide.
+     */
     data class Exception(
         val exceptions: List<TicketException>,
+        val priceAcceptance: MatchOverride? = null,
     ) : TicketInvoiceStatus {
         override val code = "EXCEPTION"
     }
@@ -152,28 +171,74 @@ class TwoWayMatch(
         val number = invoice.details.number
         if (accrual == null || !accrual.isOpen) throw ShortPayNotPossible(number, "the ticket has no receipt waiting")
         val received = accrual.lines.associateBy { it.itemId }
-        val priced =
-            invoice.lines.all { billed ->
-                val agreed = received[billed.itemId]?.unitCost
-                agreed == null ||
-                    (
-                        agreed.currency == billed.unitCost.currency &&
-                            tolerance.allows(agreed, billed.unitCost, billed.units)
-                    )
-            }
+        val priced = invoice.lines.none { priceRefused(it, received[it.itemId], accepted = false) }
         val payable =
             invoice.lines
                 .map { it.unitCost * minOf(it.units, received[it.itemId]?.units ?: 0) }
                 .reduce(Money::plus)
         val reason =
             when {
-                !priced -> "a billed price is outside tolerance"
+                !priced -> PRICE_OUTSIDE_TOLERANCE
                 payable.isZero -> "none of the units billed were received"
                 payable >= invoice.amount -> "it bills no more than was received"
                 else -> null
             }
         if (reason != null) throw ShortPayNotPossible(number, reason)
         return ShortPayment(payable, invoice.amount - payable, accrual.amount)
+    }
+
+    /**
+     * What [invoice] leaves unbilled when it bills no more than the store received and is accepted as it stands.
+     * With [priceAccepted] a unit cost outside tolerance is accepted, as a buyer's override does.
+     *
+     * @throws UnderBillingNotAcceptable for the reason [underBillingRefusal] gives.
+     */
+    fun underBilling(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual?,
+        priceAccepted: Boolean = false,
+    ): UnderBilling {
+        val refusal = underBillingRefusal(invoice, accrual, priceAccepted)
+        if (accrual == null || refusal != null) throw UnderBillingNotAcceptable(invoice.details.number, refusal)
+        val billed = invoice.lines.associate { it.itemId to it.units }
+        val unbilled =
+            accrual.lines
+                .map { it.unitCost * (it.units - (billed[it.itemId] ?: 0)) }
+                .fold(Money.zero(accrual.currency), Money::plus)
+        return UnderBilling(unbilled, accrual.amount)
+    }
+
+    /**
+     * Why [invoice] cannot be accepted as under-billed, or `null` if it can: the ticket has no accrual waiting,
+     * it bills an item the store did not receive or more units than it received, it bills everything that was
+     * received, or a billed price is outside tolerance and not [priceAccepted].
+     */
+    fun underBillingRefusal(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual?,
+        priceAccepted: Boolean,
+    ): String? {
+        if (accrual == null || !accrual.isOpen) return "the ticket has no receipt waiting"
+        val received = accrual.lines.associateBy { it.itemId }
+        val billedUnits = invoice.lines.sumOf { it.units }
+        return when {
+            invoice.lines.any { it.itemId !in received } -> "it bills an item the store did not receive"
+            invoice.lines.any { it.units > received.getValue(it.itemId).units } -> "a line bills more than was received"
+            billedUnits == accrual.lines.sumOf { it.units } -> "it bills everything that was received"
+            invoice.lines.any { priceRefused(it, received[it.itemId], priceAccepted) } -> PRICE_OUTSIDE_TOLERANCE
+            else -> null
+        }
+    }
+
+    /** Whether the price [billed] stands in the way: another currency always, outside tolerance unless [accepted]. */
+    private fun priceRefused(
+        billed: TicketAmountLine,
+        received: TicketAmountLine?,
+        accepted: Boolean,
+    ): Boolean {
+        val agreed = received?.unitCost ?: return false
+        return agreed.currency != billed.unitCost.currency ||
+            (!accepted && !tolerance.allows(agreed, billed.unitCost, billed.units))
     }
 
     private fun exceptionFor(
@@ -207,7 +272,20 @@ class TwoWayMatch(
                 null
             }
         }
+
+    private companion object {
+        const val PRICE_OUTSIDE_TOLERANCE = "a billed price is outside tolerance"
+    }
 }
+
+/**
+ * An invoice accepted though it bills less than the store received: [unbilled] is what the units received and
+ * not billed were accrued at, and [accruedAmount] is what the whole ticket was accrued at.
+ */
+data class UnderBilling(
+    val unbilled: Money,
+    val accruedAmount: Money,
+)
 
 /**
  * An invoice paid for what the store received: [payable] is owed, [deduction] is held back from what the vendor
@@ -235,6 +313,9 @@ class DirectDeliveryInvoice private constructor(
     /** The sum of the lines. */
     val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
 
+    /** The buyer's acceptance of a unit cost outside tolerance, while the invoice still waits on something else. */
+    val priceAcceptance: MatchOverride? get() = (status as? TicketInvoiceStatus.Exception)?.priceAcceptance
+
     /**
      * Checks that the invoice can still be matched, and that [override], if given, comes from someone else than
      * the person who entered it.
@@ -249,7 +330,8 @@ class DirectDeliveryInvoice private constructor(
 
     /**
      * Records the [outcome] of a two-way match, raising [DirectDeliveryInvoiceMatched] or
-     * [DirectDeliveryInvoiceMatchException]. [override] is given when the match accepted a price exception.
+     * [DirectDeliveryInvoiceMatchException]. [override] is given when the match accepted a price exception; an
+     * acceptance given earlier is kept.
      */
     fun record(
         outcome: TicketMatchOutcome,
@@ -258,9 +340,10 @@ class DirectDeliveryInvoice private constructor(
     ) {
         requireMatchable(override)
         val today = BusinessDate.today(clock)
+        val accepted = override ?: priceAcceptance
         when (outcome) {
             is TicketMatchOutcome.Matched -> {
-                status = TicketInvoiceStatus.Matched(today, override)
+                status = TicketInvoiceStatus.Matched(today, accepted)
                 raise(
                     DirectDeliveryInvoiceMatched(
                         eventId = EventId.generate(clock),
@@ -276,7 +359,7 @@ class DirectDeliveryInvoice private constructor(
             }
 
             is TicketMatchOutcome.Exceptions -> {
-                status = TicketInvoiceStatus.Exception(outcome.exceptions)
+                status = TicketInvoiceStatus.Exception(outcome.exceptions, accepted)
                 raise(
                     DirectDeliveryInvoiceMatchException(
                         eventId = EventId.generate(clock),
@@ -321,6 +404,36 @@ class DirectDeliveryInvoice private constructor(
     }
 
     /**
+     * Accepts the invoice as billed though it bills less than the store received, as [underBilling] says, on
+     * the word of [approval], and raises [DirectDeliveryInvoiceMatched] with what was left unbilled.
+     *
+     * @throws InvoiceAlreadyMatched if the invoice is already payable.
+     * @throws OverrideByInvoiceCreator if [approval] comes from the person who entered the invoice.
+     */
+    fun acceptUnderBilling(
+        underBilling: UnderBilling,
+        approval: MatchOverride,
+        clock: Clock,
+    ) {
+        requireMatchable(approval)
+        val today = BusinessDate.today(clock)
+        status = TicketInvoiceStatus.UnderBilled(today, approval, underBilling.unbilled, priceAcceptance)
+        raise(
+            DirectDeliveryInvoiceMatched(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                invoice = facts(),
+                invoiceAmount = amount.amount,
+                accruedAmount = underBilling.accruedAmount.amount,
+                costVariance = (amount - underBilling.accruedAmount).amount,
+                currency = amount.currency.currencyCode,
+                unbilledAmount = underBilling.unbilled.amount,
+            ),
+        )
+    }
+
+    /**
      * The invoice as a voucher needs it: what is owed on it, which is less than it bills if it was paid short.
      *
      * @throws IllegalStateException unless the invoice is payable.
@@ -335,6 +448,10 @@ class DirectDeliveryInvoice private constructor(
 
             is TicketInvoiceStatus.ShortPaid -> {
                 MatchedInvoice(invoice, amount - payable.deduction, payable.matchedOn, payable.approval.approvedBy)
+            }
+
+            is TicketInvoiceStatus.UnderBilled -> {
+                MatchedInvoice(invoice, amount, payable.matchedOn, payable.approval.approvedBy)
             }
 
             is TicketInvoiceStatus.Exception -> {
@@ -403,4 +520,12 @@ class ShortPayNotPossible(
 ) : BusinessRuleViolation(
         "payables.short-pay-not-possible",
         "Invoice $number cannot be paid short: $why",
+    )
+
+class UnderBillingNotAcceptable(
+    number: VendorInvoiceNumber,
+    why: String?,
+) : BusinessRuleViolation(
+        "payables.under-billing-not-acceptable",
+        "Invoice $number cannot be accepted as under-billed: $why",
     )

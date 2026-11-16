@@ -50,6 +50,9 @@ data class DirectDeliveryInvoiceEntity(
     val overrideApprovedBy: String?,
     val overrideReason: String?,
     val deduction: BigDecimal?,
+    val unbilled: BigDecimal?,
+    val priceAcceptedBy: String?,
+    val priceAcceptedReason: String?,
     @MappedCollection(idColumn = "direct_delivery_invoice_id", keyColumn = "position")
     val lines: List<DirectDeliveryInvoiceLineEntity>,
     @MappedCollection(idColumn = "direct_delivery_invoice_id", keyColumn = "position")
@@ -105,17 +108,12 @@ class JdbcDirectDeliveryInvoiceRepository(
         val audit =
             if (invoice.version == 0) AuditMetadata() else invoices.findById(invoice.id.value).orElseThrow().audit
         val status = invoice.status
-        val approval =
+        val decision = status.decision()
+        val priceAcceptance =
             when (status) {
-                is TicketInvoiceStatus.Matched -> status.override
-                is TicketInvoiceStatus.ShortPaid -> status.approval
-                is TicketInvoiceStatus.Exception -> null
-            }
-        val matchedOn =
-            when (status) {
-                is TicketInvoiceStatus.Matched -> status.matchedOn
-                is TicketInvoiceStatus.ShortPaid -> status.matchedOn
-                is TicketInvoiceStatus.Exception -> null
+                is TicketInvoiceStatus.UnderBilled -> status.priceAcceptance
+                is TicketInvoiceStatus.Exception -> status.priceAcceptance
+                else -> null
             }
         val ticket = invoice.details.ticket
         invoices.save(
@@ -129,10 +127,13 @@ class JdbcDirectDeliveryInvoiceRepository(
                 currency = invoice.amount.currency.currencyCode,
                 enteredBy = invoice.enteredBy,
                 status = status.code,
-                matchedOn = matchedOn?.value,
-                overrideApprovedBy = approval?.approvedBy,
-                overrideReason = approval?.reason,
+                matchedOn = decision?.first?.value,
+                overrideApprovedBy = decision?.second?.approvedBy,
+                overrideReason = decision?.second?.reason,
                 deduction = (status as? TicketInvoiceStatus.ShortPaid)?.deduction?.amount,
+                unbilled = (status as? TicketInvoiceStatus.UnderBilled)?.unbilled?.amount,
+                priceAcceptedBy = priceAcceptance?.approvedBy,
+                priceAcceptedReason = priceAcceptance?.reason,
                 lines = invoice.lines.toEntities().map(::DirectDeliveryInvoiceLineEntity),
                 exceptions =
                     (status as? TicketInvoiceStatus.Exception)?.exceptions.orEmpty().map {
@@ -173,6 +174,15 @@ class JdbcDirectDeliveryInvoiceRepository(
         return Page(page.content.map { it.toDomain() }, query.page, query.size, page.totalElements)
     }
 
+    /** The day a status made the invoice payable and who approved that, if anyone; `null` while it waits. */
+    private fun TicketInvoiceStatus.decision(): Pair<BusinessDate, MatchOverride?>? =
+        when (this) {
+            is TicketInvoiceStatus.Matched -> matchedOn to override
+            is TicketInvoiceStatus.ShortPaid -> matchedOn to approval
+            is TicketInvoiceStatus.UnderBilled -> matchedOn to approval
+            is TicketInvoiceStatus.Exception -> null
+        }
+
     private fun DirectDeliveryInvoiceEntity.toDomain(): DirectDeliveryInvoice {
         val money = Currency.getInstance(currency)
         return DirectDeliveryInvoice.rehydrate(
@@ -192,13 +202,25 @@ class JdbcDirectDeliveryInvoiceRepository(
 
     private fun DirectDeliveryInvoiceEntity.status(money: Currency): TicketInvoiceStatus {
         val approval = override()
+        val priceAcceptance =
+            if (priceAcceptedBy != null && priceAcceptedReason != null) {
+                MatchOverride.of(priceAcceptedBy, priceAcceptedReason)
+            } else {
+                null
+            }
         return when {
             matchedOn == null -> {
                 TicketInvoiceStatus.Exception(
                     exceptions.map {
                         TicketException(it.itemId?.let(ItemId::of), TicketExceptionReason.valueOf(it.reason), it.detail)
                     },
+                    priceAcceptance,
                 )
+            }
+
+            unbilled != null && approval != null -> {
+                val notBilled = Money.of(unbilled, money)
+                TicketInvoiceStatus.UnderBilled(BusinessDate(matchedOn), approval, notBilled, priceAcceptance)
             }
 
             deduction != null && approval != null -> {
