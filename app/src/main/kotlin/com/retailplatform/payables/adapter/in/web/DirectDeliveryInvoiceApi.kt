@@ -127,9 +127,10 @@ data class DirectDeliveryInvoiceResponse(
                 }
             val priceAcceptance =
                 when (status) {
+                    is TicketInvoiceStatus.ShortPaid -> status.priceAcceptance
                     is TicketInvoiceStatus.UnderBilled -> status.priceAcceptance
                     is TicketInvoiceStatus.Exception -> status.priceAcceptance
-                    else -> null
+                    is TicketInvoiceStatus.Matched -> null
                 }
             val payable = if (status is TicketInvoiceStatus.Exception) null else invoice.matched()
             val ticket = invoice.details.ticket
@@ -208,8 +209,8 @@ class DirectDeliveryInvoiceController(
 
     /**
      * Accepts an invoice whose unit cost is outside tolerance. For a buyer who may approve, other than the person
-     * who entered the invoice. An invoice that also bills less than the store received keeps waiting for
-     * accounting, with its price accepted.
+     * who entered the invoice. An invoice that also bills less or more than the store received keeps waiting
+     * for accounting, with its price accepted.
      */
     @PostMapping("/{id}/override")
     fun override(

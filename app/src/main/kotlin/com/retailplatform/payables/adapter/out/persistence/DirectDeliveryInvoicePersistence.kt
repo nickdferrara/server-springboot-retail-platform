@@ -111,9 +111,10 @@ class JdbcDirectDeliveryInvoiceRepository(
         val decision = status.decision()
         val priceAcceptance =
             when (status) {
+                is TicketInvoiceStatus.ShortPaid -> status.priceAcceptance
                 is TicketInvoiceStatus.UnderBilled -> status.priceAcceptance
                 is TicketInvoiceStatus.Exception -> status.priceAcceptance
-                else -> null
+                is TicketInvoiceStatus.Matched -> null
             }
         val ticket = invoice.details.ticket
         invoices.save(
@@ -224,7 +225,8 @@ class JdbcDirectDeliveryInvoiceRepository(
             }
 
             deduction != null && approval != null -> {
-                TicketInvoiceStatus.ShortPaid(BusinessDate(matchedOn), approval, Money.of(deduction, money))
+                val heldBack = Money.of(deduction, money)
+                TicketInvoiceStatus.ShortPaid(BusinessDate(matchedOn), approval, heldBack, priceAcceptance)
             }
 
             else -> {
