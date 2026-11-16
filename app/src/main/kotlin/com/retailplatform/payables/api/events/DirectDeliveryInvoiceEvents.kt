@@ -102,3 +102,23 @@ data class DirectDeliveryAdjustmentResolved(
     val vendorReference: String?,
     val schemaVersion: Int = 1,
 )
+
+/**
+ * Accounting accepted a late bill for payment: a further bill from the vendor for a delivery ticket that was
+ * already invoiced and closed. [amount] is owed to the vendor on its document [vendorInvoiceNumber] and a voucher
+ * was released for it. Nothing was accrued for it, so the whole amount is a cost variance. [businessDate] is the
+ * day it was accepted. A late bill that is rejected moves no money and publishes nothing.
+ */
+data class DirectDeliveryLateBillAccepted(
+    val eventId: EventId,
+    val occurredAt: Instant,
+    val businessDate: BusinessDate,
+    val lateBillId: UUID,
+    val vendorId: VendorId,
+    val storeId: StoreId,
+    val ticketNumber: String,
+    val vendorInvoiceNumber: String,
+    val amount: BigDecimal,
+    val currency: String,
+    val schemaVersion: Int = 1,
+)
