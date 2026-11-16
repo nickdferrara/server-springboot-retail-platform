@@ -7,6 +7,7 @@ import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
+import com.retailplatform.payables.api.events.DirectDeliveryLateBillAccepted
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
 import com.retailplatform.receiving.api.events.DirectDeliveryReceived
@@ -277,5 +278,29 @@ class DirectDeliveryAdjustmentResolvedPostingRule : PostingRule<DirectDeliveryAd
 
     private companion object {
         const val PAID = "PAID"
+    }
+}
+
+/**
+ * A late bill for a closed delivery ticket was accepted for payment: nothing is accrued for it, so debit
+ * purchase price variance and credit accounts payable for the whole amount.
+ */
+@Component
+class DirectDeliveryLateBillAcceptedPostingRule : PostingRule<DirectDeliveryLateBillAccepted> {
+    override fun posting(event: DirectDeliveryLateBillAccepted): Posting? {
+        val amount = Money.of(event.amount, Currency.getInstance(event.currency))
+        if (amount.isZero) return null
+
+        return Posting(
+            journal = Journal.PURCHASES,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Invoice ${event.vendorInvoiceNumber}"),
+            description = "Late bill ${event.vendorInvoiceNumber} for ticket ${event.ticketNumber} accepted",
+            lines =
+                listOf(
+                    PostingLine(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.DEBIT, amount),
+                    PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, amount),
+                ),
+        )
     }
 }

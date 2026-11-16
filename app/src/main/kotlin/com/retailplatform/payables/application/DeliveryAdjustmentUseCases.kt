@@ -27,13 +27,14 @@ data class VendorDocument(
 
 /**
  * Knows every document number a vendor has been paid against, so one is not paid twice: its purchase order
- * invoices, its direct delivery invoices, and the documents its adjustments were paid on.
+ * invoices, its direct delivery invoices, the documents its adjustments were paid on, and its late bills.
  */
 @Component
 class VendorDocumentNumbers(
     private val vendorInvoices: VendorInvoiceRepository,
     private val ticketInvoices: DirectDeliveryInvoiceRepository,
     private val adjustments: DeliveryAdjustmentRepository,
+    private val lateBills: LateBillRepository,
 ) {
     fun isUsed(
         vendorId: VendorId,
@@ -41,7 +42,8 @@ class VendorDocumentNumbers(
     ): Boolean =
         vendorInvoices.exists(vendorId, number) ||
             ticketInvoices.exists(vendorId, number) ||
-            adjustments.existsReference(vendorId, number)
+            adjustments.existsReference(vendorId, number) ||
+            lateBills.exists(vendorId, number)
 }
 
 /**

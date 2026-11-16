@@ -7,6 +7,7 @@ import com.retailplatform.ledger.application.CreateAccount
 import com.retailplatform.ledger.application.DirectDeliveryAdjustmentResolvedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryCorrectionPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryInvoiceMatchedPostingRule
+import com.retailplatform.ledger.application.DirectDeliveryLateBillAcceptedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryReceivedPostingRule
 import com.retailplatform.ledger.application.InvoiceMatchedPostingRule
 import com.retailplatform.ledger.application.LedgerQueries
@@ -28,6 +29,7 @@ import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceFacts
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
+import com.retailplatform.payables.api.events.DirectDeliveryLateBillAccepted
 import com.retailplatform.payables.api.events.InvoiceFacts
 import com.retailplatform.payables.api.events.InvoiceMatched
 import com.retailplatform.payables.api.events.PaymentIssued
@@ -347,6 +349,33 @@ class LedgerModuleTest(
                 Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("4.00")),
             )
         rule.posting(paid.copy(amount = BigDecimal("0.0000"))) shouldBe null
+    }
+
+    @Test
+    fun `an accepted late bill is owed in full with nothing accrued, so it all goes to the variance`() {
+        val rule = DirectDeliveryLateBillAcceptedPostingRule()
+        val accepted =
+            DirectDeliveryLateBillAccepted(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                lateBillId = UUID.randomUUID(),
+                vendorId = VendorId.generate(clock),
+                storeId = StoreId.generate(clock),
+                ticketNumber = "T-110",
+                vendorInvoiceNumber = "DSD-110B",
+                amount = BigDecimal("6.2500"),
+                currency = "USD",
+            )
+
+        val posting = requireNotNull(rule.posting(accepted))
+        posting.journal shouldBe Journal.PURCHASES
+        posting.lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.DEBIT, usd("6.25")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("6.25")),
+            )
+        rule.posting(accepted.copy(amount = BigDecimal("0.0000"))) shouldBe null
     }
 
     /** An invoice for 25.20 matched against 25.00 accrued. */

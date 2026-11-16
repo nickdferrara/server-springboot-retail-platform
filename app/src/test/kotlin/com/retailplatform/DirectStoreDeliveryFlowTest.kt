@@ -72,6 +72,7 @@ class DirectStoreDeliveryFlowTest(
 
         stockedAccruedAndPosted(vendorId, storeId, itemId)
         invoiced(vendorId, storeId, itemId)
+        lateBilled(vendorId, storeId)
         corrected(vendorId, storeId, itemId)
     }
 
@@ -357,6 +358,43 @@ class DirectStoreDeliveryFlowTest(
             "$missing/pay",
             """{"reason": "Vendor billed it", "vendorReference": "DM-1", "referenceDate": "2026-11-16"}""",
         ).andExpect { status { isNotFound() } }
+    }
+
+    /**
+     * The vendor bills ticket T-5001 again after its invoice matched. The second bill is recorded as a late bill;
+     * with sign-in off the person asking is the person who recorded it, so settling it is refused.
+     */
+    private fun lateBilled(
+        vendorId: String,
+        storeId: String,
+    ) {
+        fun record(ticket: String) =
+            post(
+                "/api/v1/payables/direct-delivery-late-bills",
+                """
+                {"vendorId": "$vendorId", "storeId": "$storeId", "ticketNumber": "$ticket",
+                 "vendorInvoiceNumber": "LATE-${System.nanoTime()}", "billDate": "$today",
+                 "amount": {"amount": 2.52, "currency": "USD"}}
+                """.trimIndent(),
+            )
+        record("T-0000").andExpect {
+            status { isUnprocessableContent() }
+            jsonPath("$.code") { value("payables.ticket-not-closed") }
+        }
+        val lateBill = created(record("T-5001"))
+        mockMvc.get(lateBill).andExpect {
+            jsonPath("$.status") { value("OPEN") }
+            jsonPath("$.amount.amount") { value(2.52) }
+        }
+        listOf("pay", "reject").forEach { action ->
+            post("$lateBill/$action", """{"reason": "Vendor did deliver them"}""").andExpect {
+                status { isUnprocessableContent() }
+                jsonPath("$.code") { value("payables.late-bill-settled-by-recorder") }
+            }
+        }
+        mockMvc.get("/api/v1/payables/direct-delivery-late-bills?vendorId=$vendorId&openOnly=true").andExpect {
+            jsonPath("$.total") { value(1) }
+        }
     }
 
     private fun post(
