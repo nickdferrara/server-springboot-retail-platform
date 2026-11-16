@@ -20,10 +20,12 @@ data class DirectDeliveryInvoiceFacts(
 
 /**
  * A vendor invoice for a delivery ticket became payable: it agreed with the store's receipt and the agreed
- * costs, a price exception was overridden, or it was short-paid. [invoiceAmount] is what the vendor billed and
- * [deductionAmount] what was held back for units billed but not received, so the invoice amount less the
- * deduction is now owed to the vendor. [accruedAmount] is what the delivered units were accrued at, agreed cost;
- * [costVariance] is what is owed less the accrued amount, negative when it is less.
+ * costs, a price exception was overridden, it was short-paid, or it was accepted though it bills less than the
+ * store received. [invoiceAmount] is what the vendor billed and [deductionAmount] what was held back for units
+ * billed but not received, so the invoice amount less the deduction is now owed to the vendor. [accruedAmount]
+ * is what the delivered units were accrued at, agreed cost; [costVariance] is what is owed less the accrued
+ * amount, negative when it is less. [unbilledAmount] is the part of the accrued amount for units received that
+ * the invoice does not bill; the ticket is closed, so it is not owed and is already within the cost variance.
  */
 data class DirectDeliveryInvoiceMatched(
     val eventId: EventId,
@@ -35,6 +37,7 @@ data class DirectDeliveryInvoiceMatched(
     val costVariance: BigDecimal,
     val currency: String,
     val deductionAmount: BigDecimal = BigDecimal.ZERO,
+    val unbilledAmount: BigDecimal = BigDecimal.ZERO,
     val schemaVersion: Int = 1,
 )
 

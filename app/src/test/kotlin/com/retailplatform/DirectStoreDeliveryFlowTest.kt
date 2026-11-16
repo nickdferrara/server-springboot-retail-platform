@@ -192,14 +192,7 @@ class DirectStoreDeliveryFlowTest(
             jsonPath("$.items[0].ticketNumber") { value("T-9999") }
             jsonPath("$.items[0].payable") { doesNotExist() }
         }
-        // With sign-in off the person asking is the person who entered the invoice, so short-pay is refused.
-        val waiting = mockMvc.get("/api/v1/payables/direct-delivery-invoices?exceptionsOnly=true").andReturn()
-        val waitingId = Regex("\"id\":\"([0-9a-f-]{36})\"").find(waiting.response.contentAsString)?.groupValues?.get(1)
-        post("/api/v1/payables/direct-delivery-invoices/$waitingId/short-pay", """{"reason": "Nothing came"}""")
-            .andExpect {
-                status { isUnprocessableContent() }
-                jsonPath("$.code") { value("payables.override-by-invoice-creator") }
-            }
+        refusedForWhoEnteredIt()
 
         val invoice = created(bill(vendorId, storeId, itemId, "T-5001", "DSD-${System.nanoTime()}"))
         mockMvc.get(invoice).andExpect {
@@ -336,6 +329,22 @@ class DirectStoreDeliveryFlowTest(
             .response
             .getHeader("Location")
             .orEmpty()
+
+    /**
+     * With sign-in off the person asking is the person who entered the invoice, so short-pay is refused, and so
+     * is accepting under-billing.
+     */
+    private fun refusedForWhoEnteredIt() {
+        val waiting = mockMvc.get("/api/v1/payables/direct-delivery-invoices?exceptionsOnly=true").andReturn()
+        val waitingId = Regex("\"id\":\"([0-9a-f-]{36})\"").find(waiting.response.contentAsString)?.groupValues?.get(1)
+        val invoice = "/api/v1/payables/direct-delivery-invoices/$waitingId"
+        listOf("short-pay", "accept-under-billing").forEach { action ->
+            post("$invoice/$action", """{"reason": "Nothing came"}""").andExpect {
+                status { isUnprocessableContent() }
+                jsonPath("$.code") { value("payables.override-by-invoice-creator") }
+            }
+        }
+    }
 
     private fun post(
         path: String,

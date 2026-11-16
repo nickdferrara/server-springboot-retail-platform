@@ -1,5 +1,6 @@
 package com.retailplatform.payables.adapter.`in`.web
 
+import com.retailplatform.payables.application.AcceptUnderBilledDirectDeliveryInvoice
 import com.retailplatform.payables.application.DirectDeliveryInvoiceQueries
 import com.retailplatform.payables.application.EnterDirectDeliveryInvoice
 import com.retailplatform.payables.application.OverrideDirectDeliveryException
@@ -107,6 +108,9 @@ data class DirectDeliveryInvoiceResponse(
     val overrideReason: String?,
     val amount: MoneyDto,
     val deduction: MoneyDto?,
+    val unbilled: MoneyDto?,
+    val priceAcceptedBy: String?,
+    val priceAcceptedReason: String?,
     val payable: MoneyDto?,
     val lines: List<TicketAmountLineResponse>,
     val exceptions: List<TicketExceptionResponse>,
@@ -118,7 +122,14 @@ data class DirectDeliveryInvoiceResponse(
                 when (status) {
                     is TicketInvoiceStatus.Matched -> status.override
                     is TicketInvoiceStatus.ShortPaid -> status.approval
+                    is TicketInvoiceStatus.UnderBilled -> status.approval
                     is TicketInvoiceStatus.Exception -> null
+                }
+            val priceAcceptance =
+                when (status) {
+                    is TicketInvoiceStatus.UnderBilled -> status.priceAcceptance
+                    is TicketInvoiceStatus.Exception -> status.priceAcceptance
+                    else -> null
                 }
             val payable = if (status is TicketInvoiceStatus.Exception) null else invoice.matched()
             val ticket = invoice.details.ticket
@@ -136,6 +147,9 @@ data class DirectDeliveryInvoiceResponse(
                 overrideReason = approval?.reason,
                 amount = MoneyDto.from(invoice.amount),
                 deduction = (status as? TicketInvoiceStatus.ShortPaid)?.deduction?.let(MoneyDto::from),
+                unbilled = (status as? TicketInvoiceStatus.UnderBilled)?.unbilled?.let(MoneyDto::from),
+                priceAcceptedBy = priceAcceptance?.approvedBy,
+                priceAcceptedReason = priceAcceptance?.reason,
                 payable = payable?.amount?.let(MoneyDto::from),
                 lines = invoice.lines.map(TicketAmountLineResponse::from),
                 exceptions =
@@ -154,6 +168,7 @@ class DirectDeliveryInvoiceController(
     private val rematchInvoice: RematchDirectDeliveryInvoice,
     private val overrideException: OverrideDirectDeliveryException,
     private val shortPayInvoice: ShortPayDirectDeliveryInvoice,
+    private val acceptUnderBilled: AcceptUnderBilledDirectDeliveryInvoice,
     private val queries: DirectDeliveryInvoiceQueries,
 ) {
     /** Enters a vendor's invoice for one delivery ticket and matches it at once. */
@@ -193,7 +208,8 @@ class DirectDeliveryInvoiceController(
 
     /**
      * Accepts an invoice whose unit cost is outside tolerance. For a buyer who may approve, other than the person
-     * who entered the invoice.
+     * who entered the invoice. An invoice that also bills less than the store received keeps waiting for
+     * accounting, with its price accepted.
      */
     @PostMapping("/{id}/override")
     fun override(
@@ -216,6 +232,20 @@ class DirectDeliveryInvoiceController(
     ): DirectDeliveryInvoiceResponse {
         val invoiceId = invoiceId(id)
         shortPayInvoice.handle(invoiceId, requireNotNull(request.reason))
+        return DirectDeliveryInvoiceResponse.from(queries.find(invoiceId))
+    }
+
+    /**
+     * Accepts an invoice that bills less than the store received, with no line that bills more: it is paid as
+     * billed and its ticket is closed. For an accounting manager other than the person who entered the invoice.
+     */
+    @PostMapping("/{id}/accept-under-billing")
+    fun acceptUnderBilling(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): DirectDeliveryInvoiceResponse {
+        val invoiceId = invoiceId(id)
+        acceptUnderBilled.handle(invoiceId, requireNotNull(request.reason))
         return DirectDeliveryInvoiceResponse.from(queries.find(invoiceId))
     }
 

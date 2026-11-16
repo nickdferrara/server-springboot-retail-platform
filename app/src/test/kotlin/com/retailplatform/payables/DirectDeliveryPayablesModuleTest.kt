@@ -6,6 +6,7 @@ import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatchExceptio
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
 import com.retailplatform.payables.api.events.PayableVoucherReleased
 import com.retailplatform.payables.api.events.PaymentIssued
+import com.retailplatform.payables.application.AcceptUnderBilledDirectDeliveryInvoice
 import com.retailplatform.payables.application.ApprovePaymentRun
 import com.retailplatform.payables.application.CancelPaymentRun
 import com.retailplatform.payables.application.DirectDeliveryInvoiceQueries
@@ -37,6 +38,7 @@ import com.retailplatform.payables.domain.TicketExceptionReason
 import com.retailplatform.payables.domain.TicketInvoiceDetails
 import com.retailplatform.payables.domain.TicketInvoiceStatus
 import com.retailplatform.payables.domain.TicketUnitChange
+import com.retailplatform.payables.domain.UnderBillingNotAcceptable
 import com.retailplatform.payables.domain.VendorCreditId
 import com.retailplatform.payables.domain.VendorCreditStatus
 import com.retailplatform.payables.domain.VendorInvoiceNumber
@@ -86,6 +88,7 @@ class DirectDeliveryPayablesModuleTest(
     @Autowired private val rematchDirectDeliveryInvoice: RematchDirectDeliveryInvoice,
     @Autowired private val overrideDirectDeliveryException: OverrideDirectDeliveryException,
     @Autowired private val shortPayInvoice: ShortPayDirectDeliveryInvoice,
+    @Autowired private val acceptUnderBilled: AcceptUnderBilledDirectDeliveryInvoice,
     @Autowired private val directDeliveryInvoices: DirectDeliveryInvoiceQueries,
     @Autowired private val vouchers: VoucherQueries,
     @Autowired private val proposePaymentRun: ProposePaymentRun,
@@ -474,6 +477,115 @@ class DirectDeliveryPayablesModuleTest(
             )
         actingAs("manager", Roles.ACCOUNTING_MANAGER)
         shouldThrow<ShortPayNotPossible> { shortPayInvoice.handle(under, "Nothing to hold back") }
+    }
+
+    @Test
+    fun `an accounting manager who did not enter the invoice accepts it though it bills less than was received`(
+        scenario: Scenario,
+    ) {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        val chips = ItemId.generate(clock)
+        delivered(
+            vendorId,
+            storeId,
+            "T-97",
+            TicketAmountLine.of(cola, 20, usd("1.25")),
+            TicketAmountLine.of(chips, 10, usd("0.80")),
+        )
+        // Bills 15 of the 20 colas and none of the chips.
+        val id = enterDirectDeliveryInvoice.handle(ticketInvoice(vendorId, storeId, "T-97", "DSD-97", cola, 15, "1.25"))
+
+        // It waits for a person: a clerk does not accept it, nor does a manager who entered the invoice.
+        directDeliveryInvoices.find(id).status.shouldBeInstanceOf<TicketInvoiceStatus.Exception>()
+        shouldThrow<AccessDeniedException> { acceptUnderBilled.handle(id, "Vendor will not bill the rest") }
+        actingAs("clerk", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<OverrideByInvoiceCreator> { acceptUnderBilled.handle(id, "Vendor will not bill the rest") }
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        scenario
+            .stimulate(Runnable { acceptUnderBilled.handle(id, "Vendor will not bill the rest") })
+            .andWaitForEventOfType(DirectDeliveryInvoiceMatched::class.java)
+            .matching { it.invoice.invoiceId == id }
+            .toArriveAndVerify { event ->
+                event.invoiceAmount shouldBe BigDecimal("18.7500")
+                event.unbilledAmount shouldBe BigDecimal("14.2500")
+                event.accruedAmount shouldBe BigDecimal("33.0000")
+                event.costVariance shouldBe BigDecimal("-14.2500")
+            }
+
+        directDeliveryInvoices.find(id).status shouldBe
+            TicketInvoiceStatus.UnderBilled(
+                today,
+                MatchOverride.of("manager", "Vendor will not bill the rest"),
+                usd("14.25"),
+            )
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("18.75")
+        directDeliveries
+            .accruals(vendorId, PageQuery.of())
+            .items
+            .single()
+            .isOpen shouldBe false
+        shouldThrow<InvoiceAlreadyMatched> { acceptUnderBilled.handle(id, "Again") }
+        shouldThrow<ResourceNotFound> { acceptUnderBilled.handle(InvoiceId.generate(clock), "Missing") }
+
+        // The ticket is closed: a late bill for the rest is refused.
+        actingAs("clerk", Roles.ACCOUNTING_CLERK)
+        shouldThrow<TicketAlreadyInvoiced> {
+            enterDirectDeliveryInvoice.handle(ticketInvoice(vendorId, storeId, "T-97", "DSD-97B", chips, 10, "0.80"))
+        }
+
+        // An invoice with a line that bills more than was received is for short-pay, not for this.
+        delivered(vendorId, storeId, "T-98", TicketAmountLine.of(cola, 18, usd("1.25")))
+        val over =
+            enterDirectDeliveryInvoice.handle(
+                ticketInvoice(vendorId, storeId, "T-98", "DSD-98", cola, 20, "1.25"),
+            )
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<UnderBillingNotAcceptable> { acceptUnderBilled.handle(over, "Bills too much") }
+    }
+
+    @Test
+    fun `an under-billed invoice over its price waits for a buyer before accounting accepts it`() {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        delivered(vendorId, storeId, "T-99", TicketAmountLine.of(cola, 20, usd("1.25")))
+        val id = enterDirectDeliveryInvoice.handle(ticketInvoice(vendorId, storeId, "T-99", "DSD-99", cola, 15, "1.50"))
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<UnderBillingNotAcceptable> { acceptUnderBilled.handle(id, "Vendor will not bill the rest") }
+
+        // The buyer accepts the price; the invoice still waits, now only for accounting.
+        actingAs("approver", Roles.BUYER_APPROVER)
+        overrideDirectDeliveryException.handle(id, "New price list not loaded yet")
+        val buyer = MatchOverride.of("approver", "New price list not loaded yet")
+        val waiting = directDeliveryInvoices.find(id).status.shouldBeInstanceOf<TicketInvoiceStatus.Exception>()
+        waiting.priceAcceptance shouldBe buyer
+        waiting.exceptions.single().reason shouldBe TicketExceptionReason.QUANTITY_DIFFERS
+        vouchers.list(vendorId, null, PageQuery.of()).total shouldBe 0
+        shouldThrow<OverrideDoesNotResolve> { overrideDirectDeliveryException.handle(id, "Again") }
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        acceptUnderBilled.handle(id, "Vendor will not bill the rest")
+
+        directDeliveryInvoices.find(id).status shouldBe
+            TicketInvoiceStatus.UnderBilled(
+                today,
+                MatchOverride.of("manager", "Vendor will not bill the rest"),
+                usd("6.25"),
+                buyer,
+            )
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("22.50")
     }
 
     @Test

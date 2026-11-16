@@ -303,7 +303,7 @@ class OverrideByInvoiceCreator(
     number: VendorInvoiceNumber,
 ) : BusinessRuleViolation(
         "payables.override-by-invoice-creator",
-        "Invoice $number cannot be overridden or paid short by the person who entered it",
+        "Invoice $number cannot be overridden, paid short, or accepted as under-billed by the person who entered it",
     )
 
 class OverrideDoesNotResolve(
