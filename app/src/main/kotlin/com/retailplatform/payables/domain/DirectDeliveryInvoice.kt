@@ -70,12 +70,14 @@ sealed interface TicketInvoiceStatus {
 
     /**
      * Paid short on [matchedOn]: the store's count stood, so only the units received are paid for and
-     * [deduction] is held back from the vendor. [approval] says who decided and why.
+     * [deduction] is held back from the vendor. [approval] says who decided and why, and [priceAcceptance] is
+     * set when a buyer accepted a unit cost outside tolerance first.
      */
     data class ShortPaid(
         val matchedOn: BusinessDate,
         val approval: MatchOverride,
         val deduction: Money,
+        val priceAcceptance: MatchOverride? = null,
     ) : TicketInvoiceStatus {
         override val code = "SHORT_PAID"
     }
@@ -159,32 +161,50 @@ class TwoWayMatch(
 
     /**
      * What [invoice] is worth when the store's count stands: for each item billed, the units the store received
-     * or the units billed, whichever is fewer, at the unit cost billed.
+     * or the units billed, whichever is fewer, at the unit cost billed. With [priceAccepted] a unit cost outside
+     * tolerance is accepted, as a buyer's override does.
      *
-     * @throws ShortPayNotPossible if the ticket has no accrual waiting, a billed price is outside tolerance, or
-     * the store's count leaves nothing to hold back or nothing to pay.
+     * @throws ShortPayNotPossible for the reason [shortPayRefusal] gives.
      */
     fun shortPay(
         invoice: DirectDeliveryInvoice,
         accrual: DirectDeliveryAccrual?,
+        priceAccepted: Boolean = false,
     ): ShortPayment {
-        val number = invoice.details.number
-        if (accrual == null || !accrual.isOpen) throw ShortPayNotPossible(number, "the ticket has no receipt waiting")
-        val received = accrual.lines.associateBy { it.itemId }
-        val priced = invoice.lines.none { priceRefused(it, received[it.itemId], accepted = false) }
-        val payable =
-            invoice.lines
-                .map { it.unitCost * minOf(it.units, received[it.itemId]?.units ?: 0) }
-                .reduce(Money::plus)
-        val reason =
-            when {
-                !priced -> PRICE_OUTSIDE_TOLERANCE
-                payable.isZero -> "none of the units billed were received"
-                payable >= invoice.amount -> "it bills no more than was received"
-                else -> null
-            }
-        if (reason != null) throw ShortPayNotPossible(number, reason)
+        val refusal = shortPayRefusal(invoice, accrual, priceAccepted)
+        if (accrual == null || refusal != null) throw ShortPayNotPossible(invoice.details.number, refusal)
+        val payable = payableShort(invoice, accrual)
         return ShortPayment(payable, invoice.amount - payable, accrual.amount)
+    }
+
+    /**
+     * Why [invoice] cannot be paid short, or `null` if it can: the ticket has no accrual waiting, a billed price
+     * is outside tolerance and not [priceAccepted], or the store's count leaves nothing to hold back or nothing
+     * to pay.
+     */
+    fun shortPayRefusal(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual?,
+        priceAccepted: Boolean,
+    ): String? {
+        if (accrual == null || !accrual.isOpen) return "the ticket has no receipt waiting"
+        val received = accrual.lines.associateBy { it.itemId }
+        val payable = payableShort(invoice, accrual)
+        return when {
+            invoice.lines.any { priceRefused(it, received[it.itemId], priceAccepted) } -> PRICE_OUTSIDE_TOLERANCE
+            payable.isZero -> "none of the units billed were received"
+            payable >= invoice.amount -> "it bills no more than was received"
+            else -> null
+        }
+    }
+
+    /** Each item billed, for the units received or billed, whichever is fewer, at the unit cost billed. */
+    private fun payableShort(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual,
+    ): Money {
+        val received = accrual.lines.associate { it.itemId to it.units }
+        return invoice.lines.map { it.unitCost * minOf(it.units, received[it.itemId] ?: 0) }.reduce(Money::plus)
     }
 
     /**
@@ -387,7 +407,7 @@ class DirectDeliveryInvoice private constructor(
     ) {
         requireMatchable(approval)
         val today = BusinessDate.today(clock)
-        status = TicketInvoiceStatus.ShortPaid(today, approval, payment.deduction)
+        status = TicketInvoiceStatus.ShortPaid(today, approval, payment.deduction, priceAcceptance)
         raise(
             DirectDeliveryInvoiceMatched(
                 eventId = EventId.generate(clock),
@@ -516,7 +536,7 @@ class TicketAlreadyInvoiced(
 
 class ShortPayNotPossible(
     number: VendorInvoiceNumber,
-    why: String,
+    why: String?,
 ) : BusinessRuleViolation(
         "payables.short-pay-not-possible",
         "Invoice $number cannot be paid short: $why",

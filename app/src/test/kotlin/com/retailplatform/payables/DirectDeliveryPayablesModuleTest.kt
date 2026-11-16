@@ -589,6 +589,38 @@ class DirectDeliveryPayablesModuleTest(
     }
 
     @Test
+    fun `an over-billed invoice over its price waits for a buyer before accounting pays it short`() {
+        val vendorId = VendorId.generate(clock)
+        val storeId = StoreId.generate(clock)
+        val cola = ItemId.generate(clock)
+        delivered(vendorId, storeId, "T-94", TicketAmountLine.of(cola, 18, usd("1.25")))
+        val id = enterDirectDeliveryInvoice.handle(ticketInvoice(vendorId, storeId, "T-94", "DSD-94", cola, 20, "1.50"))
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<ShortPayNotPossible> { shortPayInvoice.handle(id, "Store count stands") }
+
+        // The buyer accepts the price; the invoice still waits, now only for accounting.
+        actingAs("approver", Roles.BUYER_APPROVER)
+        overrideDirectDeliveryException.handle(id, "New price list not loaded yet")
+        val buyer = MatchOverride.of("approver", "New price list not loaded yet")
+        val waiting = directDeliveryInvoices.find(id).status.shouldBeInstanceOf<TicketInvoiceStatus.Exception>()
+        waiting.priceAcceptance shouldBe buyer
+        waiting.exceptions.single().reason shouldBe TicketExceptionReason.QUANTITY_DIFFERS
+        shouldThrow<OverrideDoesNotResolve> { overrideDirectDeliveryException.handle(id, "Again") }
+
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shortPayInvoice.handle(id, "Store count stands")
+
+        directDeliveryInvoices.find(id).status shouldBe
+            TicketInvoiceStatus.ShortPaid(today, MatchOverride.of("manager", "Store count stands"), usd("3.00"), buyer)
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .single()
+            .amount shouldBe usd("27.00")
+    }
+
+    @Test
     fun `a payment run deducts the vendor's open credit from its payment`(scenario: Scenario) {
         val vendorId = VendorId.generate(clock)
         val creditId = invoicedWithCredit(vendorId, "T-50", "DSD-50")

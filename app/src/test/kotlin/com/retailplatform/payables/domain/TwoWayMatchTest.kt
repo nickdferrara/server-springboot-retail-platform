@@ -256,6 +256,29 @@ class TwoWayMatchTest {
     }
 
     @Test
+    fun `an over-billed invoice over its price is paid short once a buyer has accepted the price`() {
+        val accrual = accrual(line(cola, 18, "1.25"))
+        val invoice = invoice(line(cola, 20, "1.40"))
+        shouldThrow<ShortPayNotPossible> { match.shortPay(invoice, accrual) }
+        match.shortPayRefusal(invoice, accrual, priceAccepted = true) shouldBe null
+
+        val buyer = MatchOverride.of("approver", "New price list not loaded yet")
+        invoice.record(match.match(invoice, accrual, acceptPrice = true), clock, buyer)
+        invoice.priceAcceptance shouldBe buyer
+        val approval = MatchOverride.of("manager", "Store count confirmed with the driver")
+        val payment = match.shortPay(invoice, accrual, priceAccepted = true)
+        invoice.shortPay(payment, approval, clock)
+
+        // 18 at 1.40 is paid; the 2 units never received are held back at the price billed.
+        payment shouldBe ShortPayment(usd("25.20"), usd("2.80"), usd("22.50"))
+        invoice.status shouldBe TicketInvoiceStatus.ShortPaid(today, approval, usd("2.80"), buyer)
+        // Another currency is never accepted.
+        shouldThrow<ShortPayNotPossible> {
+            match.shortPay(invoice(TicketAmountLine.of(cola, 20, Money.of("1.25", "CAD"))), accrual, true)
+        }
+    }
+
+    @Test
     fun `an invoice bills each item once, in one currency`() {
         shouldThrow<InvoiceLineRepeated> { invoice(line(cola, 1, "1.00"), line(cola, 2, "1.00")) }
         shouldThrow<InvoiceInMixedCurrencies> {
