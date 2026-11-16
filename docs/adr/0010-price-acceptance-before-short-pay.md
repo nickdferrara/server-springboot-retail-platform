@@ -4,7 +4,8 @@ Date: 2026-11-16
 
 ## Status
 
-Accepted
+Accepted. The business confirmed on 2026-11-16 that the deduction is valued at the billed price the buyer
+accepted, not at agreed cost.
 
 ## Context
 

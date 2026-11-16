@@ -5,7 +5,8 @@ Date: 2026-11-12
 ## Status
 
 Accepted. The business confirmed on 2026-11-16 that `Accounting.Manager` overrides warehouse price exceptions
-and that a vendor whose terms have not reached payables is paid net 30.
+and that a vendor whose terms have not reached payables is paid net 30. It also confirmed that a payment run is
+proposed by an `Accounting.Clerk` and approved by a different `Accounting.Manager`.
 
 ## Context
 
