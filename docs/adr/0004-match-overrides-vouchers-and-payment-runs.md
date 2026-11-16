@@ -4,7 +4,8 @@ Date: 2026-11-12
 
 ## Status
 
-Accepted. The defaults marked below wait for the business to confirm them.
+Accepted. The business confirmed on 2026-11-16 that `Accounting.Manager` overrides warehouse price exceptions
+and that a vendor whose terms have not reached payables is paid net 30.
 
 ## Context
 
@@ -25,7 +26,7 @@ who resolves match exceptions, and the bank formats for ACH, checks, and positiv
   paid that did not pass the match or an override. Its due date and discount come from the vendor's payment
   terms, which payables keeps from `VendorCreated` and `VendorTermsChanged`: an invoice uses the terms in effect
   on its invoice date. A vendor whose terms have not reached payables is paid net 30
-  (`retail.payables.default-net-days`, a default to confirm).
+  (`retail.payables.default-net-days`).
 - **Payment run.** A clerk proposes a run with a payment date and a pay-through date, normally the day of the
   next run. It selects every released voucher due on or before the pay-through date, and every voucher whose
   discount is still available on the payment date and would run out by the pay-through date. A discount is taken

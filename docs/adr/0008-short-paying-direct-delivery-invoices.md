@@ -4,7 +4,7 @@ Date: 2026-11-13
 
 ## Status
 
-Accepted
+Accepted. The business confirmed on 2026-11-16 that `Accounting.Manager` is the role that short-pays.
 
 ## Context
 
