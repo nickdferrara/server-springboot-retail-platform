@@ -63,6 +63,7 @@ class TicketInvoiceMatching(
     private val invoices: DirectDeliveryInvoiceRepository,
     private val accruals: DirectDeliveryAccrualRepository,
     private val voucherRelease: VoucherRelease,
+    private val deductionNotices: DeductionNotices,
     private val properties: PayablesProperties,
     private val events: ApplicationEventPublisher,
     private val clock: Clock,
@@ -94,7 +95,8 @@ class TicketInvoiceMatching(
     }
 
     /**
-     * Pays [invoice] for what the store received and holds the rest back, on the word of [approval].
+     * Pays [invoice] for what the store received and holds the rest back, on the word of [approval], and raises
+     * the deduction notice that tells the vendor what was held back.
      *
      * @throws ShortPayNotPossible if the store's count leaves nothing to hold back or nothing to pay.
      */
@@ -104,11 +106,14 @@ class TicketInvoiceMatching(
     ) {
         invoice.requireMatchable(approval)
         val accrual = accruals.findFor(invoice.details.ticket)
-        val payment = twoWayMatch().shortPay(invoice, accrual, invoice.priceAcceptance != null)
+        val match = twoWayMatch()
+        val payment = match.shortPay(invoice, accrual, invoice.priceAcceptance != null)
+        val open = checkNotNull(accrual)
 
         invoice.shortPay(payment, approval, clock)
         invoices.save(invoice)
-        payable(invoice, checkNotNull(accrual))
+        deductionNotices.raiseFor(invoice, approval, match.deductionLines(invoice, open))
+        payable(invoice, open)
         invoice.releaseEvents().forEach(events::publishEvent)
     }
 

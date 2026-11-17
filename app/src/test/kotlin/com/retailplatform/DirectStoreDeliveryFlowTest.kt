@@ -73,6 +73,7 @@ class DirectStoreDeliveryFlowTest(
         stockedAccruedAndPosted(vendorId, storeId, itemId)
         invoiced(vendorId, storeId, itemId)
         lateBilled(vendorId, storeId)
+        noDeductionNotice(vendorId)
         corrected(vendorId, storeId, itemId)
     }
 
@@ -395,6 +396,23 @@ class DirectStoreDeliveryFlowTest(
         mockMvc.get("/api/v1/payables/direct-delivery-late-bills?vendorId=$vendorId&openOnly=true").andExpect {
             jsonPath("$.total") { value(1) }
         }
+    }
+
+    /** Nothing was paid short, so the vendor has no deduction notice and there is none to record as sent. */
+    private fun noDeductionNotice(vendorId: String) {
+        mockMvc.get("/api/v1/payables/deduction-notices?vendorId=$vendorId").andExpect {
+            status { isOk() }
+            jsonPath("$.total") { value(0) }
+        }
+        val missing = java.util.UUID.randomUUID()
+        mockMvc.get("/api/v1/payables/direct-delivery-invoices/$missing/deduction-notice").andExpect {
+            status { isNotFound() }
+        }
+        val sent = "/api/v1/payables/deduction-notices/$missing/sent"
+        post(sent, """{"sentOn": "$today", "channel": "PIGEON", "recipient": "ar@vendor.example"}""")
+            .andExpect { status { isBadRequest() } }
+        post(sent, """{"sentOn": "$today", "channel": "EMAIL", "recipient": "ar@vendor.example"}""")
+            .andExpect { status { isNotFound() } }
     }
 
     private fun post(
