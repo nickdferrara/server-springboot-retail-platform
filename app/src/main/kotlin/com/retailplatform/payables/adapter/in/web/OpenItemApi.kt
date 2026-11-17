@@ -14,7 +14,7 @@ import org.springframework.web.bind.annotation.RequestParam
 import org.springframework.web.bind.annotation.RestController
 import java.time.LocalDate
 
-/** One direct delivery item waiting for accounting: an adjustment, a late bill, or a dispute. */
+/** One direct delivery item waiting for accounting: an adjustment, a late bill, a dispute, or an unsent notice. */
 data class OpenItemResponse(
     val kind: String,
     val id: String,
@@ -48,8 +48,9 @@ class OpenItemController(
     private val queries: OpenItemQueries,
 ) {
     /**
-     * Every adjustment, late bill, and dispute still waiting for accounting, across vendors, the one that has
-     * waited longest first. Only overdue ones with `overdueOnly=true`; one vendor's with `vendorId`.
+     * Every adjustment, late bill, dispute, and unsent deduction notice still waiting for accounting, across
+     * vendors, the one that has waited longest first. Only overdue ones with `overdueOnly=true`; one vendor's
+     * with `vendorId`.
      */
     @GetMapping
     fun list(

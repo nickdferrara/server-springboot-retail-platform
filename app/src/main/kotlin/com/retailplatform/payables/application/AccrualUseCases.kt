@@ -70,6 +70,8 @@ data class PayablesProperties(
         val lateBillDays: Long = 30,
         /** A dispute open for more than this many days since the vendor's claim arrived is overdue. */
         val disputeDays: Long = 30,
+        /** A deduction notice not sent for more than this many days since it was raised is overdue. */
+        val noticeDays: Long = 7,
     )
 
     /** How far an invoice line's cost may differ from the purchase order's and still match. */

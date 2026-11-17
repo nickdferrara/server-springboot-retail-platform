@@ -17,7 +17,7 @@ import java.time.LocalDate
 import java.util.Currency
 import java.util.UUID
 
-/** Reads open adjustments, late bills, and disputes as one list, straight from their tables. */
+/** Reads open adjustments, late bills, disputes, and unsent notices as one list, straight from their tables. */
 @Repository
 class JdbcOpenItemReader(
     private val jdbc: JdbcClient,
@@ -81,6 +81,7 @@ class JdbcOpenItemReader(
         param("adjustmentBefore", before.getValue(OpenItemKind.ADJUSTMENT).value)
             .param("lateBillBefore", before.getValue(OpenItemKind.LATE_BILL).value)
             .param("disputeBefore", before.getValue(OpenItemKind.DISPUTE).value)
+            .param("noticeBefore", before.getValue(OpenItemKind.NOTICE).value)
 
     private companion object {
         /** Every item still waiting, with the day it started to wait and the amount it is about. */
@@ -95,6 +96,9 @@ class JdbcOpenItemReader(
             UNION ALL
             SELECT 'DISPUTE', id, vendor_id, store_id, ticket_number, received_on, deduction, currency
             FROM payables.deduction_dispute WHERE status = 'OPEN'
+            UNION ALL
+            SELECT 'NOTICE', id, vendor_id, store_id, ticket_number, raised_on, amount, currency
+            FROM payables.deduction_notice WHERE sent_on IS NULL
             """.trimIndent()
 
         /** Whether an item has been open since before its kind's overdue day. */
@@ -102,7 +106,8 @@ class JdbcOpenItemReader(
             """
             ((kind = 'ADJUSTMENT' AND open_since < :adjustmentBefore)
               OR (kind = 'LATE_BILL' AND open_since < :lateBillBefore)
-              OR (kind = 'DISPUTE' AND open_since < :disputeBefore))
+              OR (kind = 'DISPUTE' AND open_since < :disputeBefore)
+              OR (kind = 'NOTICE' AND open_since < :noticeBefore))
             """.trimIndent()
     }
 }
