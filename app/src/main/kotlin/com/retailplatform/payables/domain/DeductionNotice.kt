@@ -100,6 +100,16 @@ data class NoticeSending private constructor(
     }
 }
 
+/**
+ * A sending that was recorded in error and taken back on [withdrawnOn]; [decision] says who withdrew it and why.
+ * It stays on the notice so that what the vendor was told, and when, can be traced.
+ */
+data class WithdrawnSending(
+    val sending: NoticeSending,
+    val withdrawnOn: BusinessDate,
+    val decision: MatchOverride,
+)
+
 /** The short-paid invoice a deduction notice is about. */
 data class DeductedInvoice(
     val invoiceId: InvoiceId,
@@ -111,7 +121,8 @@ data class DeductedInvoice(
 /**
  * Tells a vendor what was held back from one of its direct delivery invoices and why: the items and units it
  * billed that the store did not receive. It is raised when the invoice is paid short. Accounting sends it by its
- * own means and records that it did; [sending] is `null` until then.
+ * own means and records that it did; [sending] is `null` until then. A sending recorded in error is withdrawn,
+ * which makes the notice unsent again, and kept in [withdrawn], the earliest first.
  */
 data class DeductionNotice(
     val id: DeductionNoticeId,
@@ -122,6 +133,7 @@ data class DeductionNotice(
     val lines: List<DeductionLine>,
     val sending: NoticeSending? = null,
     val version: Int = 0,
+    val withdrawn: List<WithdrawnSending> = emptyList(),
 ) {
     /** What the notice holds back in all. */
     val amount: Money get() = lines.map { it.amount }.reduce(Money::plus)
@@ -141,6 +153,21 @@ data class DeductionNotice(
             throw DeductionNoticeSentDateInvalid(number)
         }
         return copy(sending = sending)
+    }
+
+    /**
+     * The notice with its recorded sending taken back, on the word of [decision]: it is unsent again and waits
+     * for the right sending to be recorded.
+     *
+     * @throws DeductionNoticeNotSent if no sending is recorded.
+     */
+    fun withdrawSending(
+        decision: MatchOverride,
+        clock: Clock,
+    ): DeductionNotice {
+        val recorded = sending ?: throw DeductionNoticeNotSent(number)
+        val taken = WithdrawnSending(recorded, BusinessDate.today(clock), decision)
+        return copy(sending = null, withdrawn = withdrawn + taken)
     }
 
     companion object {
@@ -174,6 +201,13 @@ class DeductionNoticeAlreadySent(
 ) : BusinessRuleViolation(
         "payables.deduction-notice-already-sent",
         "Deduction notice $number has already been recorded as sent",
+    )
+
+class DeductionNoticeNotSent(
+    number: DeductionNoticeNumber,
+) : BusinessRuleViolation(
+        "payables.deduction-notice-not-sent",
+        "Deduction notice $number has no recorded sending to withdraw",
     )
 
 class DeductionNoticeSentDateInvalid(

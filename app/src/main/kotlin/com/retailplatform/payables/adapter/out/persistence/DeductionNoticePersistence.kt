@@ -8,9 +8,11 @@ import com.retailplatform.payables.domain.DeductionLine
 import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeductionNoticeId
 import com.retailplatform.payables.domain.DeductionNoticeNumber
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.NoticeChannel
 import com.retailplatform.payables.domain.NoticeSending
 import com.retailplatform.payables.domain.VendorInvoiceNumber
+import com.retailplatform.payables.domain.WithdrawnSending
 import com.retailplatform.platform.persistence.AuditMetadata
 import com.retailplatform.shared.BusinessDate
 import com.retailplatform.shared.InvoiceId
@@ -56,6 +58,8 @@ data class DeductionNoticeEntity(
     val sentRecordedBy: String?,
     @MappedCollection(idColumn = "deduction_notice_id", keyColumn = "position")
     val lines: List<DeductionNoticeLineEntity>,
+    @MappedCollection(idColumn = "deduction_notice_id", keyColumn = "position")
+    val withdrawn: List<WithdrawnSendingEntity>,
     @Version val version: Int = 0,
     @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
 )
@@ -66,6 +70,17 @@ data class DeductionNoticeLineEntity(
     val unitsBilled: Int,
     val unitsReceived: Int,
     val unitCost: BigDecimal,
+)
+
+@Table(schema = "payables", name = "deduction_notice_withdrawn_sending")
+data class WithdrawnSendingEntity(
+    val sentOn: LocalDate,
+    val sentBy: String,
+    val sentTo: String,
+    val sentRecordedBy: String,
+    val withdrawnOn: LocalDate,
+    val withdrawnBy: String,
+    val reason: String,
 )
 
 interface DeductionNoticeJdbcRepository : CrudRepository<DeductionNoticeEntity, UUID> {
@@ -137,6 +152,7 @@ class JdbcDeductionNoticeRepository(
                     notice.lines.map {
                         DeductionNoticeLineEntity(it.itemId.value, it.unitsBilled, it.unitsReceived, it.unitCost.amount)
                     },
+                withdrawn = notice.withdrawn.map { it.toEntity() },
                 version = notice.version,
                 audit = audit,
             ),
@@ -189,8 +205,27 @@ class JdbcDeductionNoticeRepository(
                 },
             sending = sending(),
             version = version,
+            withdrawn = withdrawn.map { it.toDomain() },
         )
     }
+
+    private fun WithdrawnSending.toEntity() =
+        WithdrawnSendingEntity(
+            sentOn = sending.sentOn.value,
+            sentBy = sending.channel.name,
+            sentTo = sending.recipient,
+            sentRecordedBy = sending.recordedBy,
+            withdrawnOn = withdrawnOn.value,
+            withdrawnBy = decision.approvedBy,
+            reason = decision.reason,
+        )
+
+    private fun WithdrawnSendingEntity.toDomain() =
+        WithdrawnSending(
+            NoticeSending.of(BusinessDate(sentOn), NoticeChannel.valueOf(sentBy), sentTo, sentRecordedBy),
+            BusinessDate(withdrawnOn),
+            MatchOverride.of(withdrawnBy, reason),
+        )
 
     /** The sending columns are filled together, so the day it was sent says whether it was. */
     private fun DeductionNoticeEntity.sending(): NoticeSending? =

@@ -8,11 +8,15 @@ import com.retailplatform.payables.application.RecordDeductionNoticeSent
 import com.retailplatform.payables.application.RecordDirectDelivery
 import com.retailplatform.payables.application.RecordDirectDeliveryCommand
 import com.retailplatform.payables.application.ShortPayDirectDeliveryInvoice
+import com.retailplatform.payables.application.WithdrawDeductionNoticeSending
 import com.retailplatform.payables.domain.BilledTicket
+import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeductionNoticeAlreadySent
 import com.retailplatform.payables.domain.DeductionNoticeId
+import com.retailplatform.payables.domain.DeductionNoticeNotSent
 import com.retailplatform.payables.domain.DeductionNoticeSentDateInvalid
 import com.retailplatform.payables.domain.DeliveredTicket
+import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.NoticeChannel
 import com.retailplatform.payables.domain.NoticeSending
 import com.retailplatform.payables.domain.TicketAmountLine
@@ -50,6 +54,7 @@ class DeductionNoticeModuleTest(
     @Autowired private val enterDirectDeliveryInvoice: EnterDirectDeliveryInvoice,
     @Autowired private val shortPayInvoice: ShortPayDirectDeliveryInvoice,
     @Autowired private val recordSent: RecordDeductionNoticeSent,
+    @Autowired private val withdrawSending: WithdrawDeductionNoticeSending,
     @Autowired private val notices: DeductionNoticeQueries,
     @Autowired private val clock: Clock,
 ) {
@@ -103,14 +108,46 @@ class DeductionNoticeModuleTest(
         }
         recordSent.handle(notice.id, sent)
 
+        sentAndListed(notice, vendorId)
+        shouldThrow<DeductionNoticeAlreadySent> { recordSent.handle(notice.id, sent) }
+
+        withdrawnAndSentAgain(notice, sent)
+        shouldThrow<ResourceNotFound> { recordSent.handle(DeductionNoticeId.generate(clock), sent) }
+        shouldThrow<ResourceNotFound> { notices.forInvoice(InvoiceId.generate(clock)) }
+    }
+
+    /** The address was wrong: the clerk withdraws the sending, and the notice waits to be sent again. */
+    private fun withdrawnAndSentAgain(
+        notice: DeductionNotice,
+        sent: NoticeSent,
+    ) {
+        actingAs("manager", Roles.ACCOUNTING_MANAGER)
+        shouldThrow<AccessDeniedException> { withdrawSending.handle(notice.id, "Wrong address") }
+        actingAs("clerk", Roles.ACCOUNTING_CLERK)
+        withdrawSending.handle(notice.id, "Wrong address")
+        val unsent = notices.find(notice.id)
+        unsent.sending shouldBe null
+        unsent.withdrawn
+            .single()
+            .sending.recipient shouldBe "ar@vendor.example"
+        unsent.withdrawn.single().decision shouldBe MatchOverride.of("clerk", "Wrong address")
+        unsent.withdrawn.single().withdrawnOn shouldBe today
+        notices.list(notice.invoice.ticket.vendorId, unsentOnly = true, PageQuery.of()).total shouldBe 1
+        shouldThrow<DeductionNoticeNotSent> { withdrawSending.handle(notice.id, "Again") }
+        recordSent.handle(notice.id, sent.copy(recipient = "payables@vendor.example"))
+        notices.find(notice.id).sending?.recipient shouldBe "payables@vendor.example"
+        notices.find(notice.id).withdrawn.size shouldBe 1
+    }
+
+    private fun sentAndListed(
+        notice: DeductionNotice,
+        vendorId: VendorId,
+    ) {
         notices.find(notice.id).sending shouldBe
             NoticeSending.of(today, NoticeChannel.EMAIL, "ar@vendor.example", "clerk")
         notices.find(notice.id).lines shouldBe notice.lines
         notices.list(vendorId, unsentOnly = true, PageQuery.of()).total shouldBe 0
         notices.list(vendorId, unsentOnly = false, PageQuery.of()).total shouldBe 1
-        shouldThrow<DeductionNoticeAlreadySent> { recordSent.handle(notice.id, sent) }
-        shouldThrow<ResourceNotFound> { recordSent.handle(DeductionNoticeId.generate(clock), sent) }
-        shouldThrow<ResourceNotFound> { notices.forInvoice(InvoiceId.generate(clock)) }
     }
 
     private fun delivered(

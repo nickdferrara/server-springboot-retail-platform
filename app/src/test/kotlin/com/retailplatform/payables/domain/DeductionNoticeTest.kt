@@ -79,6 +79,16 @@ class DeductionNoticeTest {
         sent.sending shouldBe sending
         sending.recipient shouldBe "ar@vendor.example"
         shouldThrow<DeductionNoticeAlreadySent> { sent.sent(sending, clock) }
+
+        // A sending recorded in error is withdrawn: the notice is unsent again and keeps what was withdrawn.
+        val why = MatchOverride.of("clerk", "Sent to the wrong address")
+        shouldThrow<DeductionNoticeNotSent> { notice.withdrawSending(why, clock) }
+        val unsent = sent.withdrawSending(why, clock)
+        unsent.sending shouldBe null
+        unsent.withdrawn shouldBe listOf(WithdrawnSending(sending, today, why))
+        val again = unsent.sent(sentOn(today), clock).withdrawSending(why, clock)
+        again.withdrawn.size shouldBe 2
+        shouldThrow<DeductionNoticeNotSent> { again.withdrawSending(why, clock) }
         shouldThrow<IllegalArgumentException> { NoticeSending.of(today, NoticeChannel.POST, " ", "clerk") }
     }
 
