@@ -97,7 +97,10 @@ data class DeliveryAdjustmentResponse(
     val resolutionReason: String?,
     val vendorReference: String?,
     val referenceDate: LocalDate?,
+    val paidAmount: MoneyDto,
+    val writtenOffAmount: MoneyDto,
     val lines: List<TicketAmountLineResponse>,
+    val paidLines: List<TicketAmountLineResponse>?,
 ) {
     companion object {
         fun from(adjustment: DeliveryAdjustment) =
@@ -117,7 +120,13 @@ data class DeliveryAdjustmentResponse(
                 resolutionReason = adjustment.resolution?.decision?.reason,
                 vendorReference = (adjustment.resolution as? AdjustmentResolution.Paid)?.reference?.value,
                 referenceDate = (adjustment.resolution as? AdjustmentResolution.Paid)?.referenceDate?.value,
+                paidAmount = MoneyDto.from(adjustment.paidAmount),
+                writtenOffAmount = MoneyDto.from(adjustment.writtenOffAmount),
                 lines = adjustment.lines.map(TicketAmountLineResponse::from),
+                paidLines =
+                    (adjustment.resolution as? AdjustmentResolution.Paid)
+                        ?.part
+                        ?.map(TicketAmountLineResponse::from),
             )
     }
 }

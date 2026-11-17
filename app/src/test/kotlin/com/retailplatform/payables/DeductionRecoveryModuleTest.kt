@@ -14,8 +14,10 @@ import com.retailplatform.payables.application.RecordDirectDelivery
 import com.retailplatform.payables.application.RecordDirectDeliveryCommand
 import com.retailplatform.payables.application.ShortPayDirectDeliveryInvoice
 import com.retailplatform.payables.application.VendorDocument
+import com.retailplatform.payables.application.VoucherQueries
 import com.retailplatform.payables.application.WriteOffDeliveryAdjustment
 import com.retailplatform.payables.domain.AdjustmentCoveredByConcession
+import com.retailplatform.payables.domain.AdjustmentPartInvalid
 import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.DeductionAlreadyRecovered
 import com.retailplatform.payables.domain.DeductionNoticeId
@@ -64,6 +66,7 @@ class DeductionRecoveryModuleTest(
     @Autowired private val directDeliveries: DirectDeliveryPayablesQueries,
     @Autowired private val payAdjustment: PayDeliveryAdjustment,
     @Autowired private val writeOffAdjustment: WriteOffDeliveryAdjustment,
+    @Autowired private val vouchers: VoucherQueries,
     @Autowired private val clock: Clock,
 ) {
     private val today get() = BusinessDate.today(clock)
@@ -114,6 +117,32 @@ class DeductionRecoveryModuleTest(
         directDeliveries.adjustment(extraChips).statusCode shouldBe "PAID"
         directDeliveries.adjustment(colas).statusCode shouldBe "WRITTEN_OFF"
         directDeliveries.adjustments(vendorId, true, PageQuery.of()).total shouldBe 0
+    }
+
+    @Test
+    fun `when a concession gave back some of the units, the rest of their adjustment is paid in part`() {
+        val vendorId = VendorId.generate(clock)
+        val shortPaid = shortPaid(vendorId, "T-145", "DSD-145")
+        val dispute = recordDispute.handle(shortPaid.noticeId, claim("CLAIM-145"))
+        actingAs("controller", Roles.ACCOUNTING_MANAGER)
+        // One of the two colas held back is conceded; the store then finds both.
+        concedeDeduction.handle(dispute, usd("1.25"), "One was delivered")
+        val colas = corrected(shortPaid, "100146", TicketUnitChange(cola, 2, usd("1.25")))
+        val document = VendorDocument(VendorInvoiceNumber.of("DM-145"), today)
+
+        shouldThrow<AdjustmentCoveredByConcession> { payAdjustment.handle(colas, document, "Vendor billed both") }
+        shouldThrow<AdjustmentPartInvalid> { payAdjustment.handle(colas, document, "Three", listOf(cola to 3)) }
+        payAdjustment.handle(colas, document, "The other cola", listOf(cola to 1))
+
+        val settled = directDeliveries.adjustment(colas)
+        settled.statusCode shouldBe "PAID"
+        settled.paidAmount shouldBe usd("1.25")
+        settled.writtenOffAmount shouldBe usd("1.25")
+        settled.coveredLines shouldBe listOf(TicketAmountLine.of(cola, 1, usd("1.25")))
+        vouchers
+            .list(vendorId, null, PageQuery.of())
+            .items
+            .count { it.amount == usd("1.25") } shouldBe 2
     }
 
     private data class ShortPaid(

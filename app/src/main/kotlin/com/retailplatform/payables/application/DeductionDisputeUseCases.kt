@@ -83,8 +83,9 @@ class DeductionRecoveryGuard(
     }
 
     /**
-     * Checks that paying [adjustment] would not pay for units a concession already gave back. It counts
-     * with the adjustments on the ticket already paid; others still open do not stand in its way.
+     * Checks that [adjustment], as it is about to be paid, would not pay for units a concession already gave
+     * back. Only the units being paid count, with those of adjustments on the ticket already paid; others still
+     * open do not stand in its way.
      *
      * @throws AdjustmentCoveredByConcession if what was conceded is more than would be left to concede.
      */

@@ -351,6 +351,14 @@ class LedgerModuleTest(
                 Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("4.00")),
             )
         rule.posting(paid.copy(amount = BigDecimal("0.0000"))) shouldBe null
+        // Part paid and the rest written off in one step: the whole amount leaves the accrual.
+        val partPaid = paid.copy(amount = BigDecimal("2.5000"), writtenOffAmount = BigDecimal("1.5000"))
+        requireNotNull(rule.posting(partPaid)).lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, usd("4.00")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("2.50")),
+                Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, usd("1.50")),
+            )
     }
 
     @Test

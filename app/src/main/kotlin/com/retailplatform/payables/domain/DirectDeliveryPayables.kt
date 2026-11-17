@@ -274,13 +274,15 @@ sealed interface AdjustmentResolution {
 
     /**
      * The vendor is owed the amount and billed it on its document [reference], dated [referenceDate]; a voucher
-     * was released for it.
+     * was released for it. [part] is `null` when the whole adjustment was paid; otherwise it holds the items and
+     * units that were, and the rest was written off in the same step.
      */
     data class Paid(
         override val resolvedOn: BusinessDate,
         override val decision: MatchOverride,
         val reference: VendorInvoiceNumber,
         val referenceDate: BusinessDate,
+        val part: List<TicketAmountLine>? = null,
     ) : AdjustmentResolution {
         override val code = "PAID"
     }
@@ -296,9 +298,9 @@ sealed interface AdjustmentResolution {
 
 /**
  * An amount owed to a vendor that a late correction to a store's receipt brought to light. It is accrued, but no
- * invoice will match it: accounting settles it with the vendor, once and whole, by paying it or writing it off.
- * [resolution] is `null` while it waits. [lines] say which items and units it is for; an adjustment recorded
- * before lines were kept has none.
+ * invoice will match it: accounting settles it with the vendor once, by paying it, writing it off, or paying
+ * some of its units and writing off the rest. [resolution] is `null` while it waits. [lines] say which items and
+ * units it is for; an adjustment recorded before lines were kept has none.
  */
 data class DeliveryAdjustment(
     val id: DeliveryAdjustmentId,
@@ -309,8 +311,28 @@ data class DeliveryAdjustment(
     val version: Int = 0,
     val lines: List<TicketAmountLine> = emptyList(),
 ) {
-    /** Whether the amount is still owed or was paid: it was not written off. */
-    val isLive: Boolean get() = resolution !is AdjustmentResolution.WrittenOff
+    /**
+     * The items and units that are still owed or were paid: all of them while the adjustment waits, those paid
+     * once it is, and none if it was written off.
+     */
+    val coveredLines: List<TicketAmountLine>
+        get() =
+            when (val settled = resolution) {
+                null -> lines
+                is AdjustmentResolution.Paid -> settled.part ?: lines
+                is AdjustmentResolution.WrittenOff -> emptyList()
+            }
+
+    /** What was paid to the vendor: nothing unless the adjustment was paid, in whole or in part. */
+    val paidAmount: Money
+        get() =
+            when (val settled = resolution) {
+                is AdjustmentResolution.Paid -> settled.part?.map { it.amount }?.reduce(Money::plus) ?: amount
+                else -> Money.zero(amount.currency)
+            }
+
+    /** What was written off: all of it, or what was left when part was paid; nothing while it waits. */
+    val writtenOffAmount: Money get() = if (isOpen) Money.zero(amount.currency) else amount - paidAmount
 
     /** Whether the adjustment still waits for accounting. */
     val isOpen: Boolean get() = resolution == null
@@ -329,6 +351,25 @@ data class DeliveryAdjustment(
     }
 
     /**
+     * The part of the adjustment that [units] names, item by item, at the adjustment's cost; `null` if that is
+     * all of it.
+     *
+     * @throws AdjustmentPartInvalid unless every item is on the adjustment, named once, for at least one unit and
+     * no more than the adjustment has, and something is named.
+     */
+    fun partOf(units: List<Pair<ItemId, Int>>): List<TicketAmountLine>? {
+        val owed = lines.associateBy { it.itemId }
+        val named = units.map { it.first }
+        val valid =
+            units.isNotEmpty() &&
+                named.size == named.toSet().size &&
+                units.all { (itemId, count) -> count in 1..(owed[itemId]?.units ?: 0) }
+        if (!valid) throw AdjustmentPartInvalid(ticket.ticketNumber)
+        val part = units.map { (itemId, count) -> TicketAmountLine.of(itemId, count, owed.getValue(itemId).unitCost) }
+        return part.takeUnless { it.toSet() == lines.toSet() }
+    }
+
+    /**
      * The adjustment as a voucher needs it: the vendor's document stands in for an invoice.
      *
      * @throws IllegalStateException unless the adjustment was resolved by paying it.
@@ -343,7 +384,7 @@ data class DeliveryAdjustment(
                 purchaseOrderId = null,
                 paid.referenceDate,
             )
-        return MatchedInvoice(document, amount, paid.resolvedOn, paid.decision.approvedBy)
+        return MatchedInvoice(document, paidAmount, paid.resolvedOn, paid.decision.approvedBy)
     }
 
     /**
@@ -362,9 +403,11 @@ data class DeliveryAdjustment(
             storeId = ticket.storeId,
             ticketNumber = ticket.ticketNumber,
             resolution = settled.code,
-            amount = amount.amount,
+            amount = (if (settled is AdjustmentResolution.Paid) paidAmount else amount).amount,
             currency = amount.currency.currencyCode,
             vendorReference = (settled as? AdjustmentResolution.Paid)?.reference?.value,
+            writtenOffAmount =
+                (if (settled is AdjustmentResolution.Paid) writtenOffAmount else Money.zero(amount.currency)).amount,
         )
     }
 
@@ -372,6 +415,13 @@ data class DeliveryAdjustment(
         const val OPEN = "OPEN"
     }
 }
+
+class AdjustmentPartInvalid(
+    ticketNumber: String,
+) : BusinessRuleViolation(
+        "payables.adjustment-part-invalid",
+        "The units to pay on the adjustment on ticket $ticketNumber must be units the adjustment is for",
+    )
 
 class AdjustmentAlreadyResolved(
     ticketNumber: String,

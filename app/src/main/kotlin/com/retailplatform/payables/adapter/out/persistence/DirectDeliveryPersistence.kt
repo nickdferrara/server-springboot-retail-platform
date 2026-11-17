@@ -349,6 +349,8 @@ data class DeliveryAdjustmentEntity(
 @Table(schema = "payables", name = "direct_delivery_adjustment_line")
 data class DeliveryAdjustmentLineEntity(
     @Embedded.Empty val line: TicketAmountLineEntity,
+    /** The units of the line that were paid when only part of the adjustment was; `null` otherwise. */
+    val paidUnits: Int? = null,
 )
 
 interface DeliveryAdjustmentJdbcRepository : CrudRepository<DeliveryAdjustmentEntity, UUID> {
@@ -417,7 +419,7 @@ class JdbcDeliveryAdjustmentRepository(
                 resolutionReason = resolution?.decision?.reason,
                 vendorReference = paid?.reference?.value,
                 referenceDate = paid?.referenceDate?.value,
-                lines = adjustment.lines.toEntities().map(::DeliveryAdjustmentLineEntity),
+                lines = adjustment.lines.toEntities().map { DeliveryAdjustmentLineEntity(it, paid?.paidUnits(it)) },
                 version = adjustment.version,
                 audit = audit,
             ),
@@ -472,6 +474,25 @@ class JdbcDeliveryAdjustmentRepository(
             lines = lines.map { it.line.toDomain(Currency.getInstance(currency)) },
         )
 
+    /** The units of [line] this payment paid, or `null` if it paid the whole adjustment. */
+    private fun AdjustmentResolution.Paid.paidUnits(line: TicketAmountLineEntity): Int? =
+        part?.let { paid -> paid.firstOrNull { it.itemId.value == line.itemId }?.units ?: 0 }
+
+    /** The part of the adjustment that was paid, from the units paid on each line; `null` if all of it was. */
+    private fun DeliveryAdjustmentEntity.paidPart(): List<TicketAmountLine>? {
+        if (lines.none { it.paidUnits != null }) return null
+        val money = Currency.getInstance(currency)
+        return lines
+            .filter { (it.paidUnits ?: 0) > 0 }
+            .map {
+                TicketAmountLine.of(
+                    ItemId.of(it.line.itemId),
+                    checkNotNull(it.paidUnits),
+                    Money.of(it.line.unitCost, money),
+                )
+            }
+    }
+
     private fun DeliveryAdjustmentEntity.resolution(): AdjustmentResolution? {
         if (resolvedOn == null || resolvedBy == null || resolutionReason == null) return null
         val decision = MatchOverride.of(resolvedBy, resolutionReason)
@@ -481,6 +502,7 @@ class JdbcDeliveryAdjustmentRepository(
                 decision,
                 VendorInvoiceNumber.of(vendorReference),
                 BusinessDate(referenceDate),
+                paidPart(),
             )
         } else {
             AdjustmentResolution.WrittenOff(BusinessDate(resolvedOn), decision)
