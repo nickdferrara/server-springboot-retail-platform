@@ -1,6 +1,7 @@
 package com.retailplatform.payables.application
 
 import com.retailplatform.payables.domain.AdjustmentAlreadyResolved
+import com.retailplatform.payables.domain.AdjustmentCoveredByConcession
 import com.retailplatform.payables.domain.AdjustmentResolution
 import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DeliveryAdjustmentId
@@ -58,6 +59,7 @@ class VendorDocumentNumbers(
 class PayDeliveryAdjustment(
     private val adjustments: DeliveryAdjustmentRepository,
     private val documentNumbers: VendorDocumentNumbers,
+    private val recovery: DeductionRecoveryGuard,
     private val voucherRelease: VoucherRelease,
     private val currentUser: CurrentUser,
     private val events: ApplicationEventPublisher,
@@ -65,6 +67,7 @@ class PayDeliveryAdjustment(
 ) {
     /**
      * @throws AdjustmentAlreadyResolved if the adjustment was paid or written off before.
+     * @throws AdjustmentCoveredByConcession if a conceded dispute already gave these units back to the vendor.
      * @throws InvoiceAlreadyEntered if the vendor's document number was already entered or paid against.
      */
     @RequiresRole(Roles.ACCOUNTING_MANAGER)
@@ -84,6 +87,7 @@ class PayDeliveryAdjustment(
                     document.date,
                 ),
             )
+        recovery.requirePayable(adjustment)
         if (documentNumbers.isUsed(adjustment.ticket.vendorId, document.reference)) {
             throw InvoiceAlreadyEntered(document.reference)
         }

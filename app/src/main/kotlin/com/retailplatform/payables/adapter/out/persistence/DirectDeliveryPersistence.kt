@@ -340,20 +340,33 @@ data class DeliveryAdjustmentEntity(
     val resolutionReason: String?,
     val vendorReference: String?,
     val referenceDate: LocalDate?,
+    @MappedCollection(idColumn = "direct_delivery_adjustment_id", keyColumn = "position")
+    val lines: List<DeliveryAdjustmentLineEntity>,
     @Version val version: Int = 0,
     @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
 )
 
+@Table(schema = "payables", name = "direct_delivery_adjustment_line")
+data class DeliveryAdjustmentLineEntity(
+    @Embedded.Empty val line: TicketAmountLineEntity,
+)
+
 interface DeliveryAdjustmentJdbcRepository : CrudRepository<DeliveryAdjustmentEntity, UUID> {
     @Query(
-        "SELECT * FROM payables.direct_delivery_adjustment WHERE vendor_id = :vendorId " +
+        "SELECT id FROM payables.direct_delivery_adjustment WHERE vendor_id = :vendorId " +
             "AND (NOT :openOnly OR status = 'OPEN') ORDER BY recorded_on, id LIMIT :limit OFFSET :offset",
     )
-    fun findByVendor(
+    fun findIdsByVendor(
         vendorId: UUID,
         openOnly: Boolean,
         limit: Int,
         offset: Long,
+    ): List<UUID>
+
+    fun findByVendorIdAndStoreIdAndTicketNumber(
+        vendorId: UUID,
+        storeId: UUID,
+        ticketNumber: String,
     ): List<DeliveryAdjustmentEntity>
 
     @Query(
@@ -404,6 +417,7 @@ class JdbcDeliveryAdjustmentRepository(
                 resolutionReason = resolution?.decision?.reason,
                 vendorReference = paid?.reference?.value,
                 referenceDate = paid?.referenceDate?.value,
+                lines = adjustment.lines.toEntities().map(::DeliveryAdjustmentLineEntity),
                 version = adjustment.version,
                 audit = audit,
             ),
@@ -422,13 +436,22 @@ class JdbcDeliveryAdjustmentRepository(
         vendorId: VendorId,
         openOnly: Boolean,
         query: PageQuery,
-    ): Page<DeliveryAdjustment> =
-        Page(
-            adjustments.findByVendor(vendorId.value, openOnly, query.size, query.offset).map { it.toDomain() },
+    ): Page<DeliveryAdjustment> {
+        // The page is found by identifier and then loaded whole, so each adjustment comes with its lines.
+        val ids = adjustments.findIdsByVendor(vendorId.value, openOnly, query.size, query.offset)
+        val found = adjustments.findAllById(ids).associateBy { it.id }
+        return Page(
+            ids.mapNotNull { found[it]?.toDomain() },
             query.page,
             query.size,
             adjustments.countByVendor(vendorId.value, openOnly),
         )
+    }
+
+    override fun findByTicket(ticket: BilledTicket): List<DeliveryAdjustment> =
+        adjustments
+            .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
+            .map { it.toDomain() }
 
     private fun DeliveryAdjustmentEntity.toDomain() =
         DeliveryAdjustment(
@@ -446,6 +469,7 @@ class JdbcDeliveryAdjustmentRepository(
             amount = Money.of(amount, Currency.getInstance(currency)),
             resolution = resolution(),
             version = version,
+            lines = lines.map { it.line.toDomain(Currency.getInstance(currency)) },
         )
 
     private fun DeliveryAdjustmentEntity.resolution(): AdjustmentResolution? {

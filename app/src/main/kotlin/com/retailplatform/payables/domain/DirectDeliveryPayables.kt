@@ -297,7 +297,8 @@ sealed interface AdjustmentResolution {
 /**
  * An amount owed to a vendor that a late correction to a store's receipt brought to light. It is accrued, but no
  * invoice will match it: accounting settles it with the vendor, once and whole, by paying it or writing it off.
- * [resolution] is `null` while it waits.
+ * [resolution] is `null` while it waits. [lines] say which items and units it is for; an adjustment recorded
+ * before lines were kept has none.
  */
 data class DeliveryAdjustment(
     val id: DeliveryAdjustmentId,
@@ -306,7 +307,11 @@ data class DeliveryAdjustment(
     val amount: Money,
     val resolution: AdjustmentResolution? = null,
     val version: Int = 0,
+    val lines: List<TicketAmountLine> = emptyList(),
 ) {
+    /** Whether the amount is still owed or was paid: it was not written off. */
+    val isLive: Boolean get() = resolution !is AdjustmentResolution.WrittenOff
+
     /** Whether the adjustment still waits for accounting. */
     val isOpen: Boolean get() = resolution == null
 

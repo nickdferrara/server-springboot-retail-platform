@@ -1,15 +1,22 @@
 package com.retailplatform.payables.application
 
+import com.retailplatform.payables.domain.AdjustmentCoveredByConcession
+import com.retailplatform.payables.domain.BilledTicket
 import com.retailplatform.payables.domain.ConcessionOutOfRange
 import com.retailplatform.payables.domain.DeductionAlreadyDisputed
+import com.retailplatform.payables.domain.DeductionAlreadyRecovered
 import com.retailplatform.payables.domain.DeductionDispute
 import com.retailplatform.payables.domain.DeductionDisputeId
 import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeductionNoticeId
+import com.retailplatform.payables.domain.DeductionRecovery
+import com.retailplatform.payables.domain.DeliveryAdjustment
+import com.retailplatform.payables.domain.DeliveryAdjustmentKind
 import com.retailplatform.payables.domain.DisputeAlreadyDecided
 import com.retailplatform.payables.domain.DisputeClaim
 import com.retailplatform.payables.domain.DisputeDateInvalid
 import com.retailplatform.payables.domain.DisputeDecidedByDeductor
+import com.retailplatform.payables.domain.DisputeStatus
 import com.retailplatform.payables.domain.DisputedDeduction
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.MatchOverride
@@ -24,6 +31,7 @@ import com.retailplatform.shared.PageQuery
 import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.VendorId
 import org.springframework.context.ApplicationEventPublisher
+import org.springframework.stereotype.Component
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
@@ -38,6 +46,9 @@ interface DeductionDisputeRepository {
     /** The dispute of the deduction a notice told the vendor of, if the vendor disputed it. */
     fun findByNotice(noticeId: DeductionNoticeId): DeductionDispute?
 
+    /** The dispute of the deduction on a vendor's ticket at a store, if there is one. */
+    fun findByTicket(ticket: BilledTicket): DeductionDispute?
+
     /** Whether the vendor disputed a deduction under its claim [reference]. */
     fun existsReference(
         vendorId: VendorId,
@@ -50,6 +61,44 @@ interface DeductionDisputeRepository {
         openOnly: Boolean,
         query: PageQuery,
     ): Page<DeductionDispute>
+}
+
+/**
+ * Keeps the units a short-pay held back from being paid for twice: once through an adjustment, after the store
+ * corrected its receipt, and again through a conceded dispute.
+ */
+@Component
+class DeductionRecoveryGuard(
+    private val disputes: DeductionDisputeRepository,
+    private val notices: DeductionNoticeRepository,
+    private val adjustments: DeliveryAdjustmentRepository,
+) {
+    /**
+     * What of [dispute]'s deduction can still be conceded. Adjustments on the ticket that are open or paid count
+     * as covering their units; to concede those, the adjustment is written off first.
+     */
+    fun concedable(dispute: DeductionDispute): Money {
+        val notice = checkNotNull(notices.findById(dispute.deduction.noticeId)) { "A dispute has a notice" }
+        return DeductionRecovery.concedable(notice.lines, adjustments.findByTicket(dispute.deduction.ticket))
+    }
+
+    /**
+     * Checks that paying [adjustment] would not pay for units a concession already gave back. It counts
+     * with the adjustments on the ticket already paid; others still open do not stand in its way.
+     *
+     * @throws AdjustmentCoveredByConcession if what was conceded is more than would be left to concede.
+     */
+    fun requirePayable(adjustment: DeliveryAdjustment) {
+        if (adjustment.kind != DeliveryAdjustmentKind.RECEIVED_AFTER_INVOICE) return
+        val ticket = BilledTicket(adjustment.ticket.vendorId, adjustment.ticket.storeId, adjustment.ticket.ticketNumber)
+        val dispute = disputes.findByTicket(ticket)
+        val conceded = (dispute?.status as? DisputeStatus.Conceded)?.amount ?: return
+        val notice = checkNotNull(notices.findById(dispute.deduction.noticeId)) { "A dispute has a notice" }
+        val paid = adjustments.findByTicket(ticket).filter { !it.isOpen && it.id != adjustment.id }
+        if (conceded > DeductionRecovery.concedable(notice.lines, paid + adjustment)) {
+            throw AdjustmentCoveredByConcession(ticket.ticketNumber, notice.number)
+        }
+    }
 }
 
 /**
@@ -142,6 +191,7 @@ class UpholdDeduction(
 @Service
 class ConcedeDeduction(
     private val disputes: DeductionDisputeRepository,
+    private val recovery: DeductionRecoveryGuard,
     private val voucherRelease: VoucherRelease,
     private val currentUser: CurrentUser,
     private val events: ApplicationEventPublisher,
@@ -151,6 +201,7 @@ class ConcedeDeduction(
      * @throws DisputeAlreadyDecided if the dispute was decided before.
      * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
      * @throws ConcessionOutOfRange unless [amount] is more than nothing and no more than was held back.
+     * @throws DeductionAlreadyRecovered if a correction to the store's receipt already covers part of [amount].
      */
     @RequiresRole(Roles.ACCOUNTING_MANAGER)
     @Transactional
@@ -160,7 +211,8 @@ class ConcedeDeduction(
         reason: String,
     ) {
         val dispute = disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
-        val conceded = dispute.concede(amount, MatchOverride.of(currentUser.name, reason), clock)
+        val decision = MatchOverride.of(currentUser.name, reason)
+        val conceded = dispute.concede(amount, decision, clock, recovery.concedable(dispute))
 
         disputes.save(conceded)
         voucherRelease.releaseFor(conceded.payable())
@@ -173,7 +225,12 @@ class ConcedeDeduction(
 @Transactional(readOnly = true)
 class DeductionDisputeQueries(
     private val disputes: DeductionDisputeRepository,
+    private val recovery: DeductionRecoveryGuard,
 ) {
+    /** What of an open dispute's deduction can still be conceded; `null` once it is decided. */
+    fun concedable(dispute: DeductionDispute): Money? =
+        if (dispute.status == DisputeStatus.Open) recovery.concedable(dispute) else null
+
     fun find(id: DeductionDisputeId): DeductionDispute =
         disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
 

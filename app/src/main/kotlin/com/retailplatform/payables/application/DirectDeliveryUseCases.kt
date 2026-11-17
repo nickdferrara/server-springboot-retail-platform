@@ -80,6 +80,9 @@ interface DeliveryAdjustmentRepository {
         reference: VendorInvoiceNumber,
     ): Boolean
 
+    /** Every adjustment on a vendor's ticket at a store. */
+    fun findByTicket(ticket: BilledTicket): List<DeliveryAdjustment>
+
     /** A vendor's adjustments, the oldest first; only those still waiting if [openOnly]. */
     fun findByVendor(
         vendorId: VendorId,
@@ -221,7 +224,7 @@ private class CorrectionEffect(
 ) {
     private var accrualChange = Money.zero(currency)
     private var creditChange = Money.zero(currency)
-    private val flagged = mutableMapOf<DeliveryAdjustmentKind, Money>()
+    private val flagged = mutableMapOf<DeliveryAdjustmentKind, List<TicketUnitChange>>()
     private val newCredit = mutableMapOf<ItemId, TicketAmountLine>()
 
     /** The lines of the further credit the correction calls for; none if it calls for none. */
@@ -252,7 +255,7 @@ private class CorrectionEffect(
         units: List<TicketUnitChange>,
     ) {
         if (units.isEmpty()) return
-        flagged[kind] = (flagged[kind] ?: Money.zero(currency)) + total(units)
+        flagged[kind] = flagged[kind].orEmpty() + units
         accrualChange += total(units)
     }
 
@@ -260,7 +263,15 @@ private class CorrectionEffect(
         ticket: DeliveredTicket,
         clock: Clock,
     ): List<DeliveryAdjustment> =
-        flagged.map { (kind, amount) -> DeliveryAdjustment(DeliveryAdjustmentId.generate(clock), ticket, kind, amount) }
+        flagged.map { (kind, units) ->
+            DeliveryAdjustment(
+                DeliveryAdjustmentId.generate(clock),
+                ticket,
+                kind,
+                total(units),
+                lines = units.map { TicketAmountLine.of(it.itemId, it.unitsChange, it.unitCost) },
+            )
+        }
 
     fun recorded(
         ticket: DeliveredTicket,

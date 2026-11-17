@@ -97,6 +97,7 @@ data class DeliveryAdjustmentResponse(
     val resolutionReason: String?,
     val vendorReference: String?,
     val referenceDate: LocalDate?,
+    val lines: List<TicketAmountLineResponse>,
 ) {
     companion object {
         fun from(adjustment: DeliveryAdjustment) =
@@ -116,6 +117,7 @@ data class DeliveryAdjustmentResponse(
                 resolutionReason = adjustment.resolution?.decision?.reason,
                 vendorReference = (adjustment.resolution as? AdjustmentResolution.Paid)?.reference?.value,
                 referenceDate = (adjustment.resolution as? AdjustmentResolution.Paid)?.referenceDate?.value,
+                lines = adjustment.lines.map(TicketAmountLineResponse::from),
             )
     }
 }

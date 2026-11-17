@@ -16,6 +16,7 @@ import com.retailplatform.platform.web.PageResponse
 import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.platform.web.pageQuery
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.Money
 import com.retailplatform.shared.VendorId
 import jakarta.validation.Valid
 import jakarta.validation.constraints.NotBlank
@@ -76,9 +77,14 @@ data class DeductionDisputeResponse(
     val decidedBy: String?,
     val decisionReason: String?,
     val conceded: MoneyDto?,
+    val concedable: MoneyDto?,
 ) {
     companion object {
-        fun from(dispute: DeductionDispute): DeductionDisputeResponse {
+        /** [concedable] is what can still be conceded while the dispute waits; `null` once it is decided. */
+        fun from(
+            dispute: DeductionDispute,
+            concedable: Money?,
+        ): DeductionDisputeResponse {
             val decision =
                 when (val status = dispute.status) {
                     is DisputeStatus.Upheld -> status.decidedOn to status.decision
@@ -104,6 +110,7 @@ data class DeductionDisputeResponse(
                 decidedBy = decision?.second?.approvedBy,
                 decisionReason = decision?.second?.reason,
                 conceded = (dispute.status as? DisputeStatus.Conceded)?.amount?.let(MoneyDto::from),
+                concedable = concedable?.let(MoneyDto::from),
             )
         }
     }
@@ -127,7 +134,7 @@ class DeductionDisputeController(
         val id = recordDispute.handle(notice, request.toClaim())
         return ResponseEntity
             .created(URI.create("/api/v1/payables/deduction-disputes/$id"))
-            .body(DeductionDisputeResponse.from(queries.find(id)))
+            .body(response(queries.find(id)))
     }
 
     /** The dispute of the deduction a notice told the vendor of. */
@@ -136,7 +143,7 @@ class DeductionDisputeController(
         @PathVariable noticeId: String,
     ): DeductionDisputeResponse {
         val notice = mapRequest { DeductionNoticeId.parse(noticeId) }
-        return DeductionDisputeResponse.from(queries.forNotice(notice))
+        return response(queries.forNotice(notice))
     }
 
     /** A vendor's disputes, the oldest first; only those still waiting with `openOnly=true`. */
@@ -148,13 +155,13 @@ class DeductionDisputeController(
         @RequestParam(required = false) size: Int?,
     ): PageResponse<DeductionDisputeResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
-        return PageResponse.from(queries.list(vendor, openOnly, pageQuery(page, size)), DeductionDisputeResponse::from)
+        return PageResponse.from(queries.list(vendor, openOnly, pageQuery(page, size)), ::response)
     }
 
     @GetMapping("/deduction-disputes/{id}")
     fun get(
         @PathVariable id: String,
-    ): DeductionDisputeResponse = DeductionDisputeResponse.from(queries.find(disputeId(id)))
+    ): DeductionDisputeResponse = response(queries.find(disputeId(id)))
 
     /**
      * Decides that a disputed deduction stands in full. For an accounting manager other than the one who paid
@@ -167,7 +174,7 @@ class DeductionDisputeController(
     ): DeductionDisputeResponse {
         val disputeId = disputeId(id)
         upholdDeduction.handle(disputeId, requireNotNull(request.reason))
-        return DeductionDisputeResponse.from(queries.find(disputeId))
+        return response(queries.find(disputeId))
     }
 
     /**
@@ -182,8 +189,11 @@ class DeductionDisputeController(
         val disputeId = disputeId(id)
         val amount = mapRequest { requireNotNull(request.amount).toDomain() }
         concedeDeduction.handle(disputeId, amount, requireNotNull(request.reason))
-        return DeductionDisputeResponse.from(queries.find(disputeId))
+        return response(queries.find(disputeId))
     }
+
+    private fun response(dispute: DeductionDispute) =
+        DeductionDisputeResponse.from(dispute, queries.concedable(dispute))
 
     private fun disputeId(id: String): DeductionDisputeId = mapRequest { DeductionDisputeId.parse(id) }
 }
