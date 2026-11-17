@@ -59,6 +59,12 @@ data class DeductionDisputeEntity(
 interface DeductionDisputeJdbcRepository : CrudRepository<DeductionDisputeEntity, UUID> {
     fun findByDeductionNoticeId(deductionNoticeId: UUID): DeductionDisputeEntity?
 
+    fun findByVendorIdAndStoreIdAndTicketNumber(
+        vendorId: UUID,
+        storeId: UUID,
+        ticketNumber: String,
+    ): DeductionDisputeEntity?
+
     fun existsByVendorIdAndVendorReference(
         vendorId: UUID,
         vendorReference: String,
@@ -127,6 +133,11 @@ class JdbcDeductionDisputeRepository(
 
     override fun findByNotice(noticeId: DeductionNoticeId): DeductionDispute? =
         disputes.findByDeductionNoticeId(noticeId.value)?.toDomain()
+
+    override fun findByTicket(ticket: BilledTicket): DeductionDispute? =
+        disputes
+            .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
+            ?.toDomain()
 
     override fun existsReference(
         vendorId: VendorId,

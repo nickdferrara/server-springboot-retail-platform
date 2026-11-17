@@ -124,17 +124,21 @@ data class DeductionDispute(
      * @throws DisputeDecidedByDeductor if [decision] comes from the person who paid the invoice short.
      * @throws ConcessionOutOfRange unless [amount] is more than nothing, no more than the deduction, and in its
      * currency.
+     * @throws DeductionAlreadyRecovered if [amount] is more than [concedable], what a correction to the store's
+     * receipt has not already covered.
      */
     fun concede(
         amount: Money,
         decision: MatchOverride,
         clock: Clock,
+        concedable: Money = deduction.amount,
     ): DeductionDispute {
         requireDecidable(decision)
         val held = deduction.amount
         if (amount.currency != held.currency || !amount.isPositive || amount > held) {
             throw ConcessionOutOfRange(deduction.noticeNumber)
         }
+        if (amount > concedable) throw DeductionAlreadyRecovered(deduction.noticeNumber, concedable)
         return copy(status = DisputeStatus.Conceded(BusinessDate.today(clock), decision, amount))
     }
 
