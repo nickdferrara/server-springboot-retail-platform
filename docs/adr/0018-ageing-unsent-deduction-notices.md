@@ -30,7 +30,7 @@ list and gauges as the other items.
 ## Consequences
 
 - The open items list now mixes work for two roles: a clerk sends notices and a manager decides the rest. The
-  kind tells them apart; the list cannot be narrowed by kind.
+  kind tells them apart, and the list can be narrowed to one or more kinds with `kind`.
 - A short-paid invoice whose deduction is disputed before its notice is sent appears twice in the list, once
   for each.
 - As with the other kinds, the gauges remind nobody until an alert rule is written.
