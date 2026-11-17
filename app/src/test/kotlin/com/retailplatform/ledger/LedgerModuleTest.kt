@@ -4,6 +4,7 @@ import com.retailplatform.TestcontainersConfiguration
 import com.retailplatform.ledger.api.events.JournalEntryPosted
 import com.retailplatform.ledger.application.AssignPostingAccount
 import com.retailplatform.ledger.application.CreateAccount
+import com.retailplatform.ledger.application.DeductionDisputeConcededPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryAdjustmentResolvedPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryCorrectionPostingRule
 import com.retailplatform.ledger.application.DirectDeliveryInvoiceMatchedPostingRule
@@ -25,6 +26,7 @@ import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.JournalEntryUnbalanced
 import com.retailplatform.ledger.domain.PostingAccount
 import com.retailplatform.ledger.domain.UnknownAccount
+import com.retailplatform.payables.api.events.DeductionDisputeConceded
 import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceFacts
@@ -376,6 +378,34 @@ class LedgerModuleTest(
                 Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("6.25")),
             )
         rule.posting(accepted.copy(amount = BigDecimal("0.0000"))) shouldBe null
+    }
+
+    @Test
+    fun `a conceded deduction is owed to the vendor and goes to the variance`() {
+        val rule = DeductionDisputeConcededPostingRule()
+        val conceded =
+            DeductionDisputeConceded(
+                eventId = EventId.generate(clock),
+                occurredAt = clock.instant(),
+                businessDate = today,
+                disputeId = UUID.randomUUID(),
+                deductionNoticeNumber = "100001",
+                vendorId = VendorId.generate(clock),
+                storeId = StoreId.generate(clock),
+                ticketNumber = "T-130",
+                vendorReference = "CLAIM-130",
+                amount = BigDecimal("1.2500"),
+                currency = "USD",
+            )
+
+        val posting = requireNotNull(rule.posting(conceded))
+        posting.journal shouldBe Journal.PURCHASES
+        posting.lines.map { Triple(it.role, it.side, it.amount) } shouldBe
+            listOf(
+                Triple(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.DEBIT, usd("1.25")),
+                Triple(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, usd("1.25")),
+            )
+        rule.posting(conceded.copy(amount = BigDecimal("0.0000"))) shouldBe null
     }
 
     /** An invoice for 25.20 matched against 25.00 accrued. */

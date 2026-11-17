@@ -1,0 +1,188 @@
+package com.retailplatform.payables.application
+
+import com.retailplatform.payables.domain.ConcessionOutOfRange
+import com.retailplatform.payables.domain.DeductionAlreadyDisputed
+import com.retailplatform.payables.domain.DeductionDispute
+import com.retailplatform.payables.domain.DeductionDisputeId
+import com.retailplatform.payables.domain.DeductionNotice
+import com.retailplatform.payables.domain.DeductionNoticeId
+import com.retailplatform.payables.domain.DisputeAlreadyDecided
+import com.retailplatform.payables.domain.DisputeClaim
+import com.retailplatform.payables.domain.DisputeDateInvalid
+import com.retailplatform.payables.domain.DisputeDecidedByDeductor
+import com.retailplatform.payables.domain.DisputedDeduction
+import com.retailplatform.payables.domain.InvoiceAlreadyEntered
+import com.retailplatform.payables.domain.MatchOverride
+import com.retailplatform.payables.domain.TicketInvoiceStatus
+import com.retailplatform.payables.domain.VendorInvoiceNumber
+import com.retailplatform.platform.security.CurrentUser
+import com.retailplatform.platform.security.RequiresRole
+import com.retailplatform.platform.security.Roles
+import com.retailplatform.shared.Money
+import com.retailplatform.shared.Page
+import com.retailplatform.shared.PageQuery
+import com.retailplatform.shared.ResourceNotFound
+import com.retailplatform.shared.VendorId
+import org.springframework.context.ApplicationEventPublisher
+import org.springframework.stereotype.Service
+import org.springframework.transaction.annotation.Transactional
+import java.time.Clock
+
+/** Port: where vendors' disputes of deductions are kept, one per deduction notice. */
+interface DeductionDisputeRepository {
+    /** Inserts a new dispute or updates an existing one; a stale version is refused. */
+    fun save(dispute: DeductionDispute)
+
+    fun findById(id: DeductionDisputeId): DeductionDispute?
+
+    /** The dispute of the deduction a notice told the vendor of, if the vendor disputed it. */
+    fun findByNotice(noticeId: DeductionNoticeId): DeductionDispute?
+
+    /** Whether the vendor disputed a deduction under its claim [reference]. */
+    fun existsReference(
+        vendorId: VendorId,
+        reference: VendorInvoiceNumber,
+    ): Boolean
+
+    /** A vendor's disputes, the oldest first; only those still waiting if [openOnly]. */
+    fun findByVendor(
+        vendorId: VendorId,
+        openOnly: Boolean,
+        query: PageQuery,
+    ): Page<DeductionDispute>
+}
+
+/**
+ * Use case: record that a vendor disputes a deduction. A clerk records when the claim arrived, the vendor's
+ * reference for it, and what the vendor says, against the deduction notice. A deduction is disputed once.
+ */
+@Service
+class RecordDeductionDispute(
+    private val disputes: DeductionDisputeRepository,
+    private val notices: DeductionNoticeRepository,
+    private val invoices: DirectDeliveryInvoiceRepository,
+    private val documentNumbers: VendorDocumentNumbers,
+    private val currentUser: CurrentUser,
+    private val clock: Clock,
+) {
+    /**
+     * @throws DeductionAlreadyDisputed if the deduction was disputed before.
+     * @throws DisputeDateInvalid if the claim arrived before the deduction was made, or after today.
+     * @throws InvoiceAlreadyEntered if the vendor's reference was already used for another of its documents.
+     */
+    @RequiresRole(Roles.ACCOUNTING_CLERK)
+    @Transactional
+    fun handle(
+        noticeId: DeductionNoticeId,
+        claim: DisputeClaim,
+    ): DeductionDisputeId {
+        val notice = notices.findById(noticeId) ?: throw ResourceNotFound("Deduction notice", noticeId.toString())
+        if (disputes.findByNotice(noticeId) != null) throw DeductionAlreadyDisputed(notice.number)
+        requireAcceptable(claim, notice)
+
+        val dispute = DeductionDispute.record(disputed(notice), claim, currentUser.name, clock)
+        disputes.save(dispute)
+        return dispute.id
+    }
+
+    private fun requireAcceptable(
+        claim: DisputeClaim,
+        notice: DeductionNotice,
+    ) {
+        if (claim.receivedOn < notice.raisedOn) throw DisputeDateInvalid(notice.number)
+        if (documentNumbers.isUsed(notice.invoice.ticket.vendorId, claim.reference)) {
+            throw InvoiceAlreadyEntered(claim.reference)
+        }
+    }
+
+    /** The notice's deduction with who made it, which the invoice knows. */
+    private fun disputed(notice: DeductionNotice): DisputedDeduction {
+        val shortPaid = invoices.findById(notice.invoice.invoiceId)?.status as? TicketInvoiceStatus.ShortPaid
+        checkNotNull(shortPaid) { "Notice ${notice.number} is for an invoice that was not paid short" }
+        return DisputedDeduction(
+            notice.id,
+            notice.number,
+            notice.invoice.ticket,
+            notice.amount,
+            shortPaid.approval.approvedBy,
+        )
+    }
+}
+
+/**
+ * Use case: uphold a deduction a vendor disputed. An accounting manager other than the one who paid the invoice
+ * short decides the deduction stands in full, and says why. Nothing is paid and nothing is posted.
+ */
+@Service
+class UpholdDeduction(
+    private val disputes: DeductionDisputeRepository,
+    private val currentUser: CurrentUser,
+    private val clock: Clock,
+) {
+    /**
+     * @throws DisputeAlreadyDecided if the dispute was decided before.
+     * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
+     */
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        id: DeductionDisputeId,
+        reason: String,
+    ) {
+        val dispute = disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
+        disputes.save(dispute.uphold(MatchOverride.of(currentUser.name, reason), clock))
+    }
+}
+
+/**
+ * Use case: concede a deduction a vendor disputed, in whole or in part. An accounting manager other than the one
+ * who paid the invoice short decides how much is given back, and says why. A voucher is released for that amount
+ * on the vendor's payment terms; the ledger takes it as a cost variance, and stock is not touched.
+ */
+@Service
+class ConcedeDeduction(
+    private val disputes: DeductionDisputeRepository,
+    private val voucherRelease: VoucherRelease,
+    private val currentUser: CurrentUser,
+    private val events: ApplicationEventPublisher,
+    private val clock: Clock,
+) {
+    /**
+     * @throws DisputeAlreadyDecided if the dispute was decided before.
+     * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
+     * @throws ConcessionOutOfRange unless [amount] is more than nothing and no more than was held back.
+     */
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        id: DeductionDisputeId,
+        amount: Money,
+        reason: String,
+    ) {
+        val dispute = disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
+        val conceded = dispute.concede(amount, MatchOverride.of(currentUser.name, reason), clock)
+
+        disputes.save(conceded)
+        voucherRelease.releaseFor(conceded.payable())
+        events.publishEvent(conceded.concession(clock))
+    }
+}
+
+/** Queries: disputes by identifier, by deduction notice, and by vendor. */
+@Service
+@Transactional(readOnly = true)
+class DeductionDisputeQueries(
+    private val disputes: DeductionDisputeRepository,
+) {
+    fun find(id: DeductionDisputeId): DeductionDispute =
+        disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
+
+    fun forNotice(noticeId: DeductionNoticeId): DeductionDispute =
+        disputes.findByNotice(noticeId) ?: throw ResourceNotFound("Dispute of deduction notice", noticeId.toString())
+
+    fun list(
+        vendorId: VendorId,
+        openOnly: Boolean,
+        query: PageQuery,
+    ): Page<DeductionDispute> = disputes.findByVendor(vendorId, openOnly, query)
+}

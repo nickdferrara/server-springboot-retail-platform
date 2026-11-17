@@ -122,3 +122,24 @@ data class DirectDeliveryLateBillAccepted(
     val currency: String,
     val schemaVersion: Int = 1,
 )
+
+/**
+ * Accounting conceded some or all of a deduction a vendor disputed. [amount] of what a short-pay held back,
+ * told to the vendor on notice [deductionNoticeNumber], is now owed against the vendor's claim [vendorReference]
+ * and a voucher was released for it. The deduction was never a liability, so the whole amount is a cost variance.
+ * [businessDate] is the day of the decision. A dispute that is upheld moves no money and publishes nothing.
+ */
+data class DeductionDisputeConceded(
+    val eventId: EventId,
+    val occurredAt: Instant,
+    val businessDate: BusinessDate,
+    val disputeId: UUID,
+    val deductionNoticeNumber: String,
+    val vendorId: VendorId,
+    val storeId: StoreId,
+    val ticketNumber: String,
+    val vendorReference: String,
+    val amount: BigDecimal,
+    val currency: String,
+    val schemaVersion: Int = 1,
+)

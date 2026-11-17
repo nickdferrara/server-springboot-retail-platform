@@ -408,6 +408,19 @@ class DirectStoreDeliveryFlowTest(
         mockMvc.get("/api/v1/payables/direct-delivery-invoices/$missing/deduction-notice").andExpect {
             status { isNotFound() }
         }
+        // With no notice there is nothing to dispute either.
+        mockMvc.get("/api/v1/payables/deduction-disputes?vendorId=$vendorId").andExpect {
+            status { isOk() }
+            jsonPath("$.total") { value(0) }
+        }
+        post(
+            "/api/v1/payables/deduction-notices/$missing/dispute",
+            """{"receivedOn": "$today", "vendorReference": "CLAIM-1", "claim": "We delivered them"}""",
+        ).andExpect { status { isNotFound() } }
+        post(
+            "/api/v1/payables/deduction-disputes/$missing/concede",
+            """{"reason": "Conceded", "amount": {"amount": 1.25, "currency": "USD"}}""",
+        ).andExpect { status { isNotFound() } }
         val sent = "/api/v1/payables/deduction-notices/$missing/sent"
         post(sent, """{"sentOn": "$today", "channel": "PIGEON", "recipient": "ar@vendor.example"}""")
             .andExpect { status { isBadRequest() } }
