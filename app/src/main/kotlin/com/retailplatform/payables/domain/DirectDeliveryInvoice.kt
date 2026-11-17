@@ -198,6 +198,20 @@ class TwoWayMatch(
         }
     }
 
+    /**
+     * The items [invoice] bills for more units than the store received, an item it did not receive at all
+     * included: what a short-pay holds back, line by line. The lines add up to the deduction.
+     */
+    fun deductionLines(
+        invoice: DirectDeliveryInvoice,
+        accrual: DirectDeliveryAccrual,
+    ): List<DeductionLine> {
+        val received = accrual.lines.associate { it.itemId to it.units }
+        return invoice.lines
+            .filter { it.units > (received[it.itemId] ?: 0) }
+            .map { DeductionLine.of(it.itemId, it.units, received[it.itemId] ?: 0, it.unitCost) }
+    }
+
     /** Each item billed, for the units received or billed, whichever is fewer, at the unit cost billed. */
     private fun payableShort(
         invoice: DirectDeliveryInvoice,
@@ -479,6 +493,9 @@ class DirectDeliveryInvoice private constructor(
             }
         }
     }
+
+    /** The invoice as a deduction notice names it. */
+    fun deducted(): DeductedInvoice = DeductedInvoice(id, details.number, details.invoiceDate, details.ticket)
 
     private fun facts() =
         DirectDeliveryInvoiceFacts(
