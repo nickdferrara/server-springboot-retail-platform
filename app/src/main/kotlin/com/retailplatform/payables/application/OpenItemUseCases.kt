@@ -102,10 +102,14 @@ data class OpenItemCount(
     val overdue: Long,
 )
 
-/** Which open items to list: only one vendor's if [vendorId] is given, and only overdue ones if [overdueOnly]. */
+/**
+ * Which open items to list: only one vendor's if [vendorId] is given, only overdue ones if [overdueOnly], and
+ * only those of [kinds] unless it is empty, which means every kind.
+ */
 data class OpenItemFilter(
     val vendorId: VendorId?,
     val overdueOnly: Boolean,
+    val kinds: Set<OpenItemKind> = emptySet(),
 )
 
 /** Port: reads the items waiting for accounting across adjustments, late bills, disputes, and unsent notices. */

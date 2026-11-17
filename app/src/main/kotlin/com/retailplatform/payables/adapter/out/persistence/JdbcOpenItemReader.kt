@@ -27,7 +27,9 @@ class JdbcOpenItemReader(
         overdueBefore: Map<OpenItemKind, BusinessDate>,
         query: PageQuery,
     ): Page<OpenItem> {
-        val where = "WHERE (:vendorId::uuid IS NULL OR vendor_id = :vendorId::uuid) AND (NOT :overdueOnly OR $OVERDUE)"
+        val where =
+            "WHERE (:vendorId::uuid IS NULL OR vendor_id = :vendorId::uuid) " +
+                "AND (:everyKind OR kind IN (:kinds)) AND (NOT :overdueOnly OR $OVERDUE)"
         val items =
             jdbc
                 .sql("SELECT * FROM ($OPEN_ITEMS) items $where ORDER BY open_since, id LIMIT :limit OFFSET :offset")
@@ -75,6 +77,9 @@ class JdbcOpenItemReader(
     ): JdbcClient.StatementSpec =
         param("vendorId", filter.vendorId?.value?.toString())
             .param("overdueOnly", filter.overdueOnly)
+            .param("everyKind", filter.kinds.isEmpty())
+            // An IN list cannot be empty, so every kind is named when none was asked for.
+            .param("kinds", filter.kinds.ifEmpty { OpenItemKind.entries }.map { it.name })
             .overdue(overdueBefore)
 
     private fun JdbcClient.StatementSpec.overdue(before: Map<OpenItemKind, BusinessDate>): JdbcClient.StatementSpec =

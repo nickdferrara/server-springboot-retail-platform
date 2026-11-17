@@ -117,6 +117,7 @@ class OpenItemModuleTest(
         all.drop(1).map { it.item.id } shouldBe listOf(notice.id.value, lateBill.value, dispute.value)
         all[1].item.amount shouldBe usd("2.50")
         all.single { it.item.kind == OpenItemKind.DISPUTE }.item.amount shouldBe usd("2.50")
+        narrowedByKind(vendorId) shouldBe listOf(listOf(notice.id.value), 3L, 0L)
         val overdue = openItems.list(OpenItemFilter(vendorId, overdueOnly = true), PageQuery.of())
         overdue.total shouldBe 1
         overdue.items
@@ -161,6 +162,20 @@ class OpenItemModuleTest(
             ageing.ageOf(kind, today.minusDays(days + 1)) shouldBe ItemAge(days + 1, overdue = true)
             ageing.overdueBefore(kind) shouldBe today.minusDays(days)
         }
+    }
+
+    /**
+     * A clerk looks at notices alone and a manager at what needs deciding: the notices to send, how many items
+     * wait for a decision, and how many notices are overdue.
+     */
+    private fun narrowedByKind(vendorId: VendorId): List<Any> {
+        val toSend = OpenItemFilter(vendorId, overdueOnly = false, kinds = setOf(OpenItemKind.NOTICE))
+        val toDecide = toSend.copy(kinds = setOf(OpenItemKind.ADJUSTMENT, OpenItemKind.LATE_BILL, OpenItemKind.DISPUTE))
+        return listOf(
+            openItems.list(toSend, PageQuery.of()).items.map { it.item.id },
+            openItems.list(toDecide, PageQuery.of()).total,
+            openItems.list(toSend.copy(overdueOnly = true), PageQuery.of()).total,
+        )
     }
 
     private fun gaugeAfterCheck(

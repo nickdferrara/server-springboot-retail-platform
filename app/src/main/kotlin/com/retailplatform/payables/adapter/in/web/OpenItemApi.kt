@@ -2,6 +2,7 @@ package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.AgedOpenItem
 import com.retailplatform.payables.application.OpenItemFilter
+import com.retailplatform.payables.application.OpenItemKind
 import com.retailplatform.payables.application.OpenItemQueries
 import com.retailplatform.platform.web.MoneyDto
 import com.retailplatform.platform.web.PageResponse
@@ -50,17 +51,20 @@ class OpenItemController(
     /**
      * Every adjustment, late bill, dispute, and unsent deduction notice still waiting for accounting, across
      * vendors, the one that has waited longest first. Only overdue ones with `overdueOnly=true`; one vendor's
-     * with `vendorId`.
+     * with `vendorId`; and only some kinds with `kind`, which may be given more than once: `ADJUSTMENT`,
+     * `LATE_BILL`, `DISPUTE`, or `NOTICE`.
      */
     @GetMapping
     fun list(
         @RequestParam(required = false) vendorId: String?,
         @RequestParam(defaultValue = "false") overdueOnly: Boolean,
+        @RequestParam(required = false) kind: List<String>?,
         @RequestParam(required = false) page: Int?,
         @RequestParam(required = false) size: Int?,
     ): PageResponse<OpenItemResponse> {
         val vendor = mapRequest { vendorId?.let(VendorId::parse) }
-        val filter = OpenItemFilter(vendor, overdueOnly)
+        val kinds = mapRequest { kind.orEmpty().map(OpenItemKind::valueOf).toSet() }
+        val filter = OpenItemFilter(vendor, overdueOnly, kinds)
         return PageResponse.from(queries.list(filter, pageQuery(page, size)), OpenItemResponse::from)
     }
 }

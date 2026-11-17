@@ -407,6 +407,10 @@ class DirectStoreDeliveryFlowTest(
         mockMvc.get("/api/v1/payables/direct-delivery-open-items?overdueOnly=true&vendorId=$vendorId").andExpect {
             jsonPath("$.total") { value(0) }
         }
+        val byKind = "/api/v1/payables/direct-delivery-open-items?vendorId=$vendorId"
+        mockMvc.get("$byKind&kind=LATE_BILL&kind=DISPUTE").andExpect { jsonPath("$.total") { value(1) } }
+        mockMvc.get("$byKind&kind=NOTICE").andExpect { jsonPath("$.total") { value(0) } }
+        mockMvc.get("$byKind&kind=INVOICE").andExpect { status { isBadRequest() } }
         mockMvc.get(lateBill).andExpect {
             jsonPath("$.ageDays") { value(0) }
             jsonPath("$.overdue") { value(false) }
