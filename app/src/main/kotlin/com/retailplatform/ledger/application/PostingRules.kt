@@ -4,6 +4,7 @@ import com.retailplatform.ledger.domain.EntrySide
 import com.retailplatform.ledger.domain.EntrySource
 import com.retailplatform.ledger.domain.Journal
 import com.retailplatform.ledger.domain.PostingAccount
+import com.retailplatform.payables.api.events.DeductionDisputeConceded
 import com.retailplatform.payables.api.events.DirectDeliveryAdjustmentResolved
 import com.retailplatform.payables.api.events.DirectDeliveryCorrectionRecorded
 import com.retailplatform.payables.api.events.DirectDeliveryInvoiceMatched
@@ -296,6 +297,30 @@ class DirectDeliveryLateBillAcceptedPostingRule : PostingRule<DirectDeliveryLate
             businessDate = event.businessDate,
             source = EntrySource("payables", event.eventId, "Invoice ${event.vendorInvoiceNumber}"),
             description = "Late bill ${event.vendorInvoiceNumber} for ticket ${event.ticketNumber} accepted",
+            lines =
+                listOf(
+                    PostingLine(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.DEBIT, amount),
+                    PostingLine(PostingAccount.ACCOUNTS_PAYABLE, EntrySide.CREDIT, amount),
+                ),
+        )
+    }
+}
+
+/**
+ * Some or all of a disputed deduction was conceded to the vendor: the deduction was never a liability, so debit
+ * purchase price variance and credit accounts payable for what is given back.
+ */
+@Component
+class DeductionDisputeConcededPostingRule : PostingRule<DeductionDisputeConceded> {
+    override fun posting(event: DeductionDisputeConceded): Posting? {
+        val amount = Money.of(event.amount, Currency.getInstance(event.currency))
+        if (amount.isZero) return null
+
+        return Posting(
+            journal = Journal.PURCHASES,
+            businessDate = event.businessDate,
+            source = EntrySource("payables", event.eventId, "Deduction notice ${event.deductionNoticeNumber}"),
+            description = "Deduction on notice ${event.deductionNoticeNumber} conceded to the vendor",
             lines =
                 listOf(
                     PostingLine(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.DEBIT, amount),
