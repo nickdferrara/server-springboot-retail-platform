@@ -5,11 +5,13 @@ import com.retailplatform.payables.application.ItemAge
 import com.retailplatform.payables.application.NoticeSent
 import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.RecordDeductionNoticeSent
+import com.retailplatform.payables.application.WithdrawDeductionNoticeSending
 import com.retailplatform.payables.domain.DeductionLine
 import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeductionNoticeId
 import com.retailplatform.payables.domain.NoticeChannel
 import com.retailplatform.payables.domain.NoticeSending
+import com.retailplatform.payables.domain.WithdrawnSending
 import com.retailplatform.platform.web.MoneyDto
 import com.retailplatform.platform.web.PageResponse
 import com.retailplatform.platform.web.mapRequest
@@ -69,6 +71,30 @@ data class DeductionLineResponse(
     }
 }
 
+/** A sending that was recorded in error and withdrawn. */
+data class WithdrawnSendingResponse(
+    val sentOn: LocalDate,
+    val sentBy: String,
+    val sentTo: String,
+    val sentRecordedBy: String,
+    val withdrawnOn: LocalDate,
+    val withdrawnBy: String,
+    val reason: String,
+) {
+    companion object {
+        fun from(withdrawn: WithdrawnSending) =
+            WithdrawnSendingResponse(
+                sentOn = withdrawn.sending.sentOn.value,
+                sentBy = withdrawn.sending.channel.name,
+                sentTo = withdrawn.sending.recipient,
+                sentRecordedBy = withdrawn.sending.recordedBy,
+                withdrawnOn = withdrawn.withdrawnOn.value,
+                withdrawnBy = withdrawn.decision.approvedBy,
+                reason = withdrawn.decision.reason,
+            )
+    }
+}
+
 /** What a vendor is told was held back from one of its invoices, and whether it has been told. */
 data class DeductionNoticeResponse(
     val id: String,
@@ -87,6 +113,7 @@ data class DeductionNoticeResponse(
     val sentBy: String?,
     val sentTo: String?,
     val sentRecordedBy: String?,
+    val withdrawnSendings: List<WithdrawnSendingResponse>,
     val ageDays: Long?,
     val overdue: Boolean,
 ) {
@@ -114,6 +141,7 @@ data class DeductionNoticeResponse(
                 sentBy = notice.sending?.channel?.name,
                 sentTo = notice.sending?.recipient,
                 sentRecordedBy = notice.sending?.recordedBy,
+                withdrawnSendings = notice.withdrawn.map(WithdrawnSendingResponse::from),
                 ageDays = age?.days,
                 overdue = age?.overdue ?: false,
             )
@@ -125,6 +153,7 @@ data class DeductionNoticeResponse(
 @RequestMapping("/api/v1/payables")
 class DeductionNoticeController(
     private val recordSent: RecordDeductionNoticeSent,
+    private val withdrawSending: WithdrawDeductionNoticeSending,
     private val queries: DeductionNoticeQueries,
     private val ageing: OpenItemAgeing,
 ) {
@@ -162,6 +191,20 @@ class DeductionNoticeController(
     ): DeductionNoticeResponse {
         val noticeId = noticeId(id)
         recordSent.handle(noticeId, request.toSent())
+        return response(queries.find(noticeId))
+    }
+
+    /**
+     * Withdraws a sending that was recorded in error: the notice is unsent again until the right sending is
+     * recorded, and the withdrawn one stays on record. For an accounting clerk.
+     */
+    @PostMapping("/deduction-notices/{id}/sent/withdraw")
+    fun withdraw(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): DeductionNoticeResponse {
+        val noticeId = noticeId(id)
+        withdrawSending.handle(noticeId, requireNotNull(request.reason))
         return response(queries.find(noticeId))
     }
 

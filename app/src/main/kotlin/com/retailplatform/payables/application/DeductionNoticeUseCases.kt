@@ -4,6 +4,7 @@ import com.retailplatform.payables.domain.DeductionLine
 import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeductionNoticeAlreadySent
 import com.retailplatform.payables.domain.DeductionNoticeId
+import com.retailplatform.payables.domain.DeductionNoticeNotSent
 import com.retailplatform.payables.domain.DeductionNoticeNumber
 import com.retailplatform.payables.domain.DeductionNoticeSentDateInvalid
 import com.retailplatform.payables.domain.DirectDeliveryInvoice
@@ -96,6 +97,29 @@ class RecordDeductionNoticeSent(
         val notice = notices.findById(id) ?: throw ResourceNotFound("Deduction notice", id.toString())
         val sending = NoticeSending.of(sent.sentOn, sent.channel, sent.recipient, currentUser.name)
         notices.save(notice.sent(sending, clock))
+    }
+}
+
+/**
+ * Use case: withdraw a sending that was recorded in error, because a detail is wrong or the notice was never
+ * sent. A clerk says why. The notice is unsent again, so it ages and is listed until the right sending is
+ * recorded; the withdrawn one stays on the notice.
+ */
+@Service
+class WithdrawDeductionNoticeSending(
+    private val notices: DeductionNoticeRepository,
+    private val currentUser: CurrentUser,
+    private val clock: Clock,
+) {
+    /** @throws DeductionNoticeNotSent if the notice has no recorded sending. */
+    @RequiresRole(Roles.ACCOUNTING_CLERK)
+    @Transactional
+    fun handle(
+        id: DeductionNoticeId,
+        reason: String,
+    ) {
+        val notice = notices.findById(id) ?: throw ResourceNotFound("Deduction notice", id.toString())
+        notices.save(notice.withdrawSending(MatchOverride.of(currentUser.name, reason), clock))
     }
 }
 

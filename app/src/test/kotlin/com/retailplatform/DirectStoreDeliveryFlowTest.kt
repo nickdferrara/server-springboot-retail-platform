@@ -440,6 +440,8 @@ class DirectStoreDeliveryFlowTest(
             "/api/v1/payables/deduction-disputes/$missing/concede",
             """{"reason": "Conceded", "amount": {"amount": 1.25, "currency": "USD"}}""",
         ).andExpect { status { isNotFound() } }
+        post("/api/v1/payables/deduction-notices/$missing/sent/withdraw", """{"reason": "Wrong address"}""")
+            .andExpect { status { isNotFound() } }
         val sent = "/api/v1/payables/deduction-notices/$missing/sent"
         post(sent, """{"sentOn": "$today", "channel": "PIGEON", "recipient": "ar@vendor.example"}""")
             .andExpect { status { isBadRequest() } }
