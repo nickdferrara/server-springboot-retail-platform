@@ -9,7 +9,9 @@ import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.VendorInvoiceNumber
 import com.retailplatform.platform.web.mapRequest
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.ItemId
 import jakarta.validation.Valid
+import jakarta.validation.constraints.Min
 import jakarta.validation.constraints.NotBlank
 import jakarta.validation.constraints.NotNull
 import jakarta.validation.constraints.Size
@@ -21,6 +23,13 @@ import org.springframework.web.bind.annotation.RequestMapping
 import org.springframework.web.bind.annotation.RestController
 import java.time.LocalDate
 
+data class PaidUnitsRequest(
+    @field:NotBlank
+    val itemId: String?,
+    @field:NotNull @field:Min(1)
+    val units: Int?,
+)
+
 data class PayDeliveryAdjustmentRequest(
     @field:NotBlank @field:Size(max = VendorInvoiceNumber.MAX_LENGTH)
     val vendorReference: String?,
@@ -28,7 +37,13 @@ data class PayDeliveryAdjustmentRequest(
     val referenceDate: LocalDate?,
     @field:NotBlank @field:Size(max = MatchOverride.MAX_REASON_LENGTH)
     val reason: String?,
+    /** The units of each item to pay; left out to pay the whole adjustment. */
+    @field:Valid
+    val units: List<PaidUnitsRequest>? = null,
 ) {
+    fun toUnits(): List<Pair<ItemId, Int>>? =
+        mapRequest { units?.map { ItemId.parse(requireNotNull(it.itemId)) to requireNotNull(it.units) } }
+
     fun toDocument(): VendorDocument =
         mapRequest {
             VendorDocument(
@@ -52,7 +67,8 @@ class DeliveryAdjustmentController(
 
     /**
      * Pays an adjustment: the vendor is owed the amount and billed it on the document given, and a voucher is
-     * released for the whole amount. For an accounting manager.
+     * released. With `units`, only those units of each item are paid and the rest is written off in the same
+     * step. For an accounting manager.
      */
     @PostMapping("/pay")
     fun pay(
@@ -60,7 +76,7 @@ class DeliveryAdjustmentController(
         @Valid @RequestBody request: PayDeliveryAdjustmentRequest,
     ): DeliveryAdjustmentResponse {
         val adjustmentId = adjustmentId(id)
-        payAdjustment.handle(adjustmentId, request.toDocument(), requireNotNull(request.reason))
+        payAdjustment.handle(adjustmentId, request.toDocument(), requireNotNull(request.reason), request.toUnits())
         return DeliveryAdjustmentResponse.from(queries.adjustment(adjustmentId))
     }
 

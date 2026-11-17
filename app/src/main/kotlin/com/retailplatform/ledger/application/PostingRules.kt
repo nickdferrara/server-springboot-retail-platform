@@ -251,16 +251,24 @@ class DirectDeliveryCorrectionPostingRule : PostingRule<DirectDeliveryCorrection
 }
 
 /**
- * A direct delivery adjustment was settled: debit accrued direct delivery payables for the amount, and credit
- * accounts payable when the vendor is to be paid, or purchase price variance when the amount is written off.
+ * A direct delivery adjustment was settled: debit accrued direct delivery payables for all of it, credit accounts
+ * payable for what the vendor is to be paid, and credit purchase price variance for what is written off.
  */
 @Component
 class DirectDeliveryAdjustmentResolvedPostingRule : PostingRule<DirectDeliveryAdjustmentResolved> {
     override fun posting(event: DirectDeliveryAdjustmentResolved): Posting? {
-        val amount = Money.of(event.amount, Currency.getInstance(event.currency))
-        if (amount.isZero) return null
+        val currency = Currency.getInstance(event.currency)
+        val amount = Money.of(event.amount, currency)
+        val alsoWrittenOff = Money.of(event.writtenOffAmount, currency)
         val paid = event.resolution == PAID
         val credited = if (paid) PostingAccount.ACCOUNTS_PAYABLE else PostingAccount.PURCHASE_PRICE_VARIANCE
+        val lines =
+            listOf(
+                PostingLine(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, amount + alsoWrittenOff),
+                PostingLine(credited, EntrySide.CREDIT, amount),
+                PostingLine(PostingAccount.PURCHASE_PRICE_VARIANCE, EntrySide.CREDIT, alsoWrittenOff),
+            ).filterNot { it.amount.isZero }
+        if (lines.isEmpty()) return null
 
         return Posting(
             journal = Journal.PURCHASES,
@@ -269,11 +277,7 @@ class DirectDeliveryAdjustmentResolvedPostingRule : PostingRule<DirectDeliveryAd
             description =
                 "Direct delivery adjustment on ticket ${event.ticketNumber} " +
                     if (paid) "to be paid" else "written off",
-            lines =
-                listOf(
-                    PostingLine(PostingAccount.ACCRUED_DIRECT_DELIVERY_PAYABLES, EntrySide.DEBIT, amount),
-                    PostingLine(credited, EntrySide.CREDIT, amount),
-                ),
+            lines = lines,
         )
     }
 

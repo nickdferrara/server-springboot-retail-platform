@@ -11,8 +11,8 @@ import com.retailplatform.shared.Money
 object DeductionRecovery {
     /**
      * What of the deduction in [lines] can still be conceded, given the [adjustments] on the ticket. For each
-     * item held back, units that an adjustment for units received after the invoice covers, unless it was written
-     * off, no longer count; the rest do, at the unit cost billed. Other items on the ticket change nothing.
+     * item held back, units that an adjustment for units received after the invoice still owes or paid no longer
+     * count, and units it wrote off do; the rest do, at the unit cost billed. Other items on the ticket change nothing.
      */
     fun concedable(
         lines: List<DeductionLine>,
@@ -20,8 +20,8 @@ object DeductionRecovery {
     ): Money {
         val covered =
             adjustments
-                .filter { it.kind == DeliveryAdjustmentKind.RECEIVED_AFTER_INVOICE && it.isLive }
-                .flatMap { it.lines }
+                .filter { it.kind == DeliveryAdjustmentKind.RECEIVED_AFTER_INVOICE }
+                .flatMap { it.coveredLines }
                 .groupBy({ it.itemId }, { it.units })
                 .mapValues { (_, units) -> units.sum() }
         return lines

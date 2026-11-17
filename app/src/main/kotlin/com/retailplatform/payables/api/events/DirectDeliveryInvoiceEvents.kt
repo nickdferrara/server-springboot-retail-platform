@@ -86,7 +86,9 @@ data class DirectDeliveryCorrectionRecorded(
  * Accounting settled an amount that a late correction to a store's receipt had left accrued with no invoice to
  * match it. [resolution] is `PAID` when the vendor is owed [amount] and a voucher was released for it against the
  * vendor's document [vendorReference], or `WRITTEN_OFF` when it is not owed and leaves what is accrued as a
- * favourable variance; [vendorReference] is then `null`. [businessDate] is the day it was settled.
+ * favourable variance; [vendorReference] is then `null`. When only part of an adjustment is paid, [resolution]
+ * is `PAID`, [amount] is the part paid, and [writtenOffAmount] is the rest, written off in the same step; it is
+ * zero otherwise. [businessDate] is the day it was settled.
  */
 data class DirectDeliveryAdjustmentResolved(
     val eventId: EventId,
@@ -100,6 +102,7 @@ data class DirectDeliveryAdjustmentResolved(
     val amount: BigDecimal,
     val currency: String,
     val vendorReference: String?,
+    val writtenOffAmount: BigDecimal = BigDecimal.ZERO,
     val schemaVersion: Int = 1,
 )
 

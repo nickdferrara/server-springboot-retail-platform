@@ -9,6 +9,7 @@ import com.retailplatform.shared.VendorId
 import io.kotest.assertions.throwables.shouldThrow
 import io.kotest.matchers.shouldBe
 import org.junit.jupiter.api.Test
+import java.math.BigDecimal
 import java.time.Clock
 import java.time.Instant
 import java.time.ZoneOffset
@@ -59,6 +60,36 @@ class DeductionRecoveryTest {
 
         DeductionRecovery.concedable(deduction, listOf(writtenOff, returnReversed, otherItem, withoutLines)) shouldBe
             usd("7.90")
+    }
+
+    @Test
+    fun `part of an adjustment is paid by units and the rest is written off`() {
+        val found = adjustment(TicketAmountLine.of(cola, 5, usd("1.25")), TicketAmountLine.of(chips, 2, usd("0.80")))
+        found.paidAmount shouldBe usd("0.00")
+        found.writtenOffAmount shouldBe usd("0.00")
+
+        val part = found.partOf(listOf(cola to 3))
+        val paid = found.resolve(AdjustmentResolution.Paid(today, manager, VendorInvoiceNumber.of("DM-2"), today, part))
+
+        part shouldBe listOf(TicketAmountLine.of(cola, 3, usd("1.25")))
+        paid.paidAmount shouldBe usd("3.75")
+        paid.writtenOffAmount shouldBe usd("4.10")
+        paid.payable().amount shouldBe usd("3.75")
+        val event = paid.resolved(clock)
+        event.resolution shouldBe "PAID"
+        event.amount shouldBe BigDecimal("3.7500")
+        event.writtenOffAmount shouldBe BigDecimal("4.1000")
+        // Only the 3 colas paid still cover units of the deduction: 2 colas and the chips can be conceded.
+        DeductionRecovery.concedable(deduction, listOf(paid)) shouldBe usd("4.12")
+
+        // Naming every unit is paying the whole; units the adjustment is not for are refused.
+        found.partOf(listOf(chips to 2, cola to 5)) shouldBe null
+        shouldThrow<AdjustmentPartInvalid> { found.partOf(listOf(cola to 6)) }
+        shouldThrow<AdjustmentPartInvalid> { found.partOf(listOf(cola to 0)) }
+        shouldThrow<AdjustmentPartInvalid> { found.partOf(listOf(cola to 1, cola to 1)) }
+        shouldThrow<AdjustmentPartInvalid> { found.partOf(listOf(ItemId.generate(clock) to 1)) }
+        shouldThrow<AdjustmentPartInvalid> { found.partOf(emptyList()) }
+        shouldThrow<AdjustmentPartInvalid> { adjustment().partOf(listOf(cola to 1)) }
     }
 
     @Test

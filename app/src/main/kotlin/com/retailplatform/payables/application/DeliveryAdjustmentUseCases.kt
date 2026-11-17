@@ -2,6 +2,7 @@ package com.retailplatform.payables.application
 
 import com.retailplatform.payables.domain.AdjustmentAlreadyResolved
 import com.retailplatform.payables.domain.AdjustmentCoveredByConcession
+import com.retailplatform.payables.domain.AdjustmentPartInvalid
 import com.retailplatform.payables.domain.AdjustmentResolution
 import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DeliveryAdjustmentId
@@ -12,6 +13,7 @@ import com.retailplatform.platform.security.CurrentUser
 import com.retailplatform.platform.security.RequiresRole
 import com.retailplatform.platform.security.Roles
 import com.retailplatform.shared.BusinessDate
+import com.retailplatform.shared.ItemId
 import com.retailplatform.shared.ResourceNotFound
 import com.retailplatform.shared.VendorId
 import org.springframework.context.ApplicationEventPublisher
@@ -51,9 +53,10 @@ class VendorDocumentNumbers(
 }
 
 /**
- * Use case: pay a direct delivery adjustment. The vendor is owed the amount and has billed it on a document of
- * its own; an accounting manager says which and why, and a voucher is released for the whole amount on the
- * vendor's payment terms.
+ * Use case: pay a direct delivery adjustment, in whole or in part. The vendor is owed the amount and has billed
+ * it on a document of its own; an accounting manager says which and why, and a voucher is released on the
+ * vendor's payment terms. To pay only part, the manager names the units of each item to pay; the rest is written
+ * off in the same step, so the adjustment is still settled once.
  */
 @Service
 class PayDeliveryAdjustment(
@@ -69,6 +72,7 @@ class PayDeliveryAdjustment(
      * @throws AdjustmentAlreadyResolved if the adjustment was paid or written off before.
      * @throws AdjustmentCoveredByConcession if a conceded dispute already gave these units back to the vendor.
      * @throws InvoiceAlreadyEntered if the vendor's document number was already entered or paid against.
+     * @throws AdjustmentPartInvalid if [units] names units the adjustment is not for.
      */
     @RequiresRole(Roles.ACCOUNTING_MANAGER)
     @Transactional
@@ -76,6 +80,7 @@ class PayDeliveryAdjustment(
         id: DeliveryAdjustmentId,
         document: VendorDocument,
         reason: String,
+        units: List<Pair<ItemId, Int>>? = null,
     ) {
         val adjustment = adjustments.findById(id) ?: throw ResourceNotFound("Adjustment", id.toString())
         val paid =
@@ -85,9 +90,10 @@ class PayDeliveryAdjustment(
                     MatchOverride.of(currentUser.name, reason),
                     document.reference,
                     document.date,
+                    units?.let(adjustment::partOf),
                 ),
             )
-        recovery.requirePayable(adjustment)
+        recovery.requirePayable(paid)
         if (documentNumbers.isUsed(adjustment.ticket.vendorId, document.reference)) {
             throw InvoiceAlreadyEntered(document.reference)
         }
