@@ -1,6 +1,8 @@
 package com.retailplatform.payables.adapter.`in`.web
 
+import com.retailplatform.payables.application.ItemAge
 import com.retailplatform.payables.application.LateBillQueries
+import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.PayLateBill
 import com.retailplatform.payables.application.RecordLateBill
 import com.retailplatform.payables.application.RejectLateBill
@@ -82,9 +84,15 @@ data class LateBillResponse(
     val settledOn: LocalDate?,
     val settledBy: String?,
     val settlementReason: String?,
+    val ageDays: Long?,
+    val overdue: Boolean,
 ) {
     companion object {
-        fun from(lateBill: LateBill): LateBillResponse {
+        /** [age] is how long the late bill has waited; `null` once it is settled. */
+        fun from(
+            lateBill: LateBill,
+            age: ItemAge?,
+        ): LateBillResponse {
             val settlement =
                 when (val status = lateBill.status) {
                     is LateBillStatus.Paid -> status.settledOn to status.decision
@@ -106,6 +114,8 @@ data class LateBillResponse(
                 settledOn = settlement?.first?.value,
                 settledBy = settlement?.second?.approvedBy,
                 settlementReason = settlement?.second?.reason,
+                ageDays = age?.days,
+                overdue = age?.overdue ?: false,
             )
         }
     }
@@ -118,6 +128,7 @@ class LateBillController(
     private val payLateBill: PayLateBill,
     private val rejectLateBill: RejectLateBill,
     private val queries: LateBillQueries,
+    private val ageing: OpenItemAgeing,
 ) {
     /** Records a further bill from a vendor for a ticket whose invoice is already payable. */
     @PostMapping
@@ -127,7 +138,7 @@ class LateBillController(
         val id = recordLateBill.handle(request.toDetails())
         return ResponseEntity
             .created(URI.create("/api/v1/payables/direct-delivery-late-bills/$id"))
-            .body(LateBillResponse.from(queries.find(id)))
+            .body(response(queries.find(id)))
     }
 
     /** A vendor's late bills, the oldest first; only those still waiting with `openOnly=true`. */
@@ -139,13 +150,13 @@ class LateBillController(
         @RequestParam(required = false) size: Int?,
     ): PageResponse<LateBillResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
-        return PageResponse.from(queries.list(vendor, openOnly, pageQuery(page, size)), LateBillResponse::from)
+        return PageResponse.from(queries.list(vendor, openOnly, pageQuery(page, size)), ::response)
     }
 
     @GetMapping("/{id}")
     fun get(
         @PathVariable id: String,
-    ): LateBillResponse = LateBillResponse.from(queries.find(lateBillId(id)))
+    ): LateBillResponse = response(queries.find(lateBillId(id)))
 
     /**
      * Accepts a late bill for payment: a voucher is released for its total. For an accounting manager other than
@@ -158,7 +169,7 @@ class LateBillController(
     ): LateBillResponse {
         val lateBillId = lateBillId(id)
         payLateBill.handle(lateBillId, requireNotNull(request.reason))
-        return LateBillResponse.from(queries.find(lateBillId))
+        return response(queries.find(lateBillId))
     }
 
     /**
@@ -172,8 +183,10 @@ class LateBillController(
     ): LateBillResponse {
         val lateBillId = lateBillId(id)
         rejectLateBill.handle(lateBillId, requireNotNull(request.reason))
-        return LateBillResponse.from(queries.find(lateBillId))
+        return response(queries.find(lateBillId))
     }
+
+    private fun response(lateBill: LateBill) = LateBillResponse.from(lateBill, ageing.ageOf(lateBill))
 
     private fun lateBillId(id: String): LateBillId = mapRequest { LateBillId.parse(id) }
 }

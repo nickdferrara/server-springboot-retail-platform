@@ -2,6 +2,8 @@ package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.ConcedeDeduction
 import com.retailplatform.payables.application.DeductionDisputeQueries
+import com.retailplatform.payables.application.ItemAge
+import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.RecordDeductionDispute
 import com.retailplatform.payables.application.UpholdDeduction
 import com.retailplatform.payables.domain.DeductionDispute
@@ -78,12 +80,18 @@ data class DeductionDisputeResponse(
     val decisionReason: String?,
     val conceded: MoneyDto?,
     val concedable: MoneyDto?,
+    val ageDays: Long?,
+    val overdue: Boolean,
 ) {
     companion object {
-        /** [concedable] is what can still be conceded while the dispute waits; `null` once it is decided. */
+        /**
+         * [concedable] is what can still be conceded and [age] how long the dispute has waited; both are `null`
+         * once it is decided.
+         */
         fun from(
             dispute: DeductionDispute,
             concedable: Money?,
+            age: ItemAge?,
         ): DeductionDisputeResponse {
             val decision =
                 when (val status = dispute.status) {
@@ -111,6 +119,8 @@ data class DeductionDisputeResponse(
                 decisionReason = decision?.second?.reason,
                 conceded = (dispute.status as? DisputeStatus.Conceded)?.amount?.let(MoneyDto::from),
                 concedable = concedable?.let(MoneyDto::from),
+                ageDays = age?.days,
+                overdue = age?.overdue ?: false,
             )
         }
     }
@@ -123,6 +133,7 @@ class DeductionDisputeController(
     private val upholdDeduction: UpholdDeduction,
     private val concedeDeduction: ConcedeDeduction,
     private val queries: DeductionDisputeQueries,
+    private val ageing: OpenItemAgeing,
 ) {
     /** Records that the vendor disputes the deduction a notice told it of. A deduction is disputed once. */
     @PostMapping("/deduction-notices/{noticeId}/dispute")
@@ -193,7 +204,7 @@ class DeductionDisputeController(
     }
 
     private fun response(dispute: DeductionDispute) =
-        DeductionDisputeResponse.from(dispute, queries.concedable(dispute))
+        DeductionDisputeResponse.from(dispute, queries.concedable(dispute), ageing.ageOf(dispute))
 
     private fun disputeId(id: String): DeductionDisputeId = mapRequest { DeductionDisputeId.parse(id) }
 }

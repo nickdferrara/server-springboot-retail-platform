@@ -1,6 +1,7 @@
 package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
+import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.PayDeliveryAdjustment
 import com.retailplatform.payables.application.VendorDocument
 import com.retailplatform.payables.application.WriteOffDeliveryAdjustment
@@ -59,11 +60,12 @@ class DeliveryAdjustmentController(
     private val payAdjustment: PayDeliveryAdjustment,
     private val writeOffAdjustment: WriteOffDeliveryAdjustment,
     private val queries: DirectDeliveryPayablesQueries,
+    private val ageing: OpenItemAgeing,
 ) {
     @GetMapping
     fun get(
         @PathVariable id: String,
-    ): DeliveryAdjustmentResponse = DeliveryAdjustmentResponse.from(queries.adjustment(adjustmentId(id)))
+    ): DeliveryAdjustmentResponse = response(adjustmentId(id))
 
     /**
      * Pays an adjustment: the vendor is owed the amount and billed it on the document given, and a voucher is
@@ -77,7 +79,7 @@ class DeliveryAdjustmentController(
     ): DeliveryAdjustmentResponse {
         val adjustmentId = adjustmentId(id)
         payAdjustment.handle(adjustmentId, request.toDocument(), requireNotNull(request.reason), request.toUnits())
-        return DeliveryAdjustmentResponse.from(queries.adjustment(adjustmentId))
+        return response(adjustmentId)
     }
 
     /**
@@ -91,7 +93,12 @@ class DeliveryAdjustmentController(
     ): DeliveryAdjustmentResponse {
         val adjustmentId = adjustmentId(id)
         writeOffAdjustment.handle(adjustmentId, requireNotNull(request.reason))
-        return DeliveryAdjustmentResponse.from(queries.adjustment(adjustmentId))
+        return response(adjustmentId)
+    }
+
+    private fun response(id: DeliveryAdjustmentId): DeliveryAdjustmentResponse {
+        val adjustment = queries.adjustment(id)
+        return DeliveryAdjustmentResponse.from(adjustment, ageing.ageOf(adjustment))
     }
 
     private fun adjustmentId(id: String): DeliveryAdjustmentId = mapRequest { DeliveryAdjustmentId.parse(id) }

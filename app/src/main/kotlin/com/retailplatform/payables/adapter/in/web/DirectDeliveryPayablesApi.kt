@@ -1,6 +1,8 @@
 package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.DirectDeliveryPayablesQueries
+import com.retailplatform.payables.application.ItemAge
+import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.domain.AdjustmentResolution
 import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DeliveryAdjustment
@@ -101,33 +103,40 @@ data class DeliveryAdjustmentResponse(
     val writtenOffAmount: MoneyDto,
     val lines: List<TicketAmountLineResponse>,
     val paidLines: List<TicketAmountLineResponse>?,
+    val ageDays: Long?,
+    val overdue: Boolean,
 ) {
     companion object {
-        fun from(adjustment: DeliveryAdjustment) =
-            DeliveryAdjustmentResponse(
-                id = adjustment.id.toString(),
-                deliveryId = adjustment.ticket.deliveryId.toString(),
-                receiptNumber = adjustment.ticket.receiptNumber,
-                vendorId = adjustment.ticket.vendorId.toString(),
-                storeId = adjustment.ticket.storeId.toString(),
-                ticketNumber = adjustment.ticket.ticketNumber,
-                recordedOn = adjustment.ticket.receivedOn.value,
-                kind = adjustment.kind.name,
-                amount = MoneyDto.from(adjustment.amount),
-                status = adjustment.statusCode,
-                resolvedOn = adjustment.resolution?.resolvedOn?.value,
-                resolvedBy = adjustment.resolution?.decision?.approvedBy,
-                resolutionReason = adjustment.resolution?.decision?.reason,
-                vendorReference = (adjustment.resolution as? AdjustmentResolution.Paid)?.reference?.value,
-                referenceDate = (adjustment.resolution as? AdjustmentResolution.Paid)?.referenceDate?.value,
-                paidAmount = MoneyDto.from(adjustment.paidAmount),
-                writtenOffAmount = MoneyDto.from(adjustment.writtenOffAmount),
-                lines = adjustment.lines.map(TicketAmountLineResponse::from),
-                paidLines =
-                    (adjustment.resolution as? AdjustmentResolution.Paid)
-                        ?.part
-                        ?.map(TicketAmountLineResponse::from),
-            )
+        /** [age] is how long the adjustment has waited; `null` once it is settled. */
+        fun from(
+            adjustment: DeliveryAdjustment,
+            age: ItemAge?,
+        ) = DeliveryAdjustmentResponse(
+            id = adjustment.id.toString(),
+            deliveryId = adjustment.ticket.deliveryId.toString(),
+            receiptNumber = adjustment.ticket.receiptNumber,
+            vendorId = adjustment.ticket.vendorId.toString(),
+            storeId = adjustment.ticket.storeId.toString(),
+            ticketNumber = adjustment.ticket.ticketNumber,
+            recordedOn = adjustment.ticket.receivedOn.value,
+            kind = adjustment.kind.name,
+            amount = MoneyDto.from(adjustment.amount),
+            status = adjustment.statusCode,
+            resolvedOn = adjustment.resolution?.resolvedOn?.value,
+            resolvedBy = adjustment.resolution?.decision?.approvedBy,
+            resolutionReason = adjustment.resolution?.decision?.reason,
+            vendorReference = (adjustment.resolution as? AdjustmentResolution.Paid)?.reference?.value,
+            referenceDate = (adjustment.resolution as? AdjustmentResolution.Paid)?.referenceDate?.value,
+            paidAmount = MoneyDto.from(adjustment.paidAmount),
+            writtenOffAmount = MoneyDto.from(adjustment.writtenOffAmount),
+            lines = adjustment.lines.map(TicketAmountLineResponse::from),
+            paidLines =
+                (adjustment.resolution as? AdjustmentResolution.Paid)
+                    ?.part
+                    ?.map(TicketAmountLineResponse::from),
+            ageDays = age?.days,
+            overdue = age?.overdue ?: false,
+        )
     }
 }
 
@@ -135,6 +144,7 @@ data class DeliveryAdjustmentResponse(
 @RequestMapping("/api/v1/payables")
 class DirectDeliveryPayablesController(
     private val queries: DirectDeliveryPayablesQueries,
+    private val ageing: OpenItemAgeing,
 ) {
     /** What is accrued for a vendor's direct store deliveries, the oldest delivery first. */
     @GetMapping("/direct-delivery-accruals")
@@ -172,6 +182,6 @@ class DirectDeliveryPayablesController(
     ): PageResponse<DeliveryAdjustmentResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
         val found = queries.adjustments(vendor, openOnly, pageQuery(page, size))
-        return PageResponse.from(found, DeliveryAdjustmentResponse::from)
+        return PageResponse.from(found) { DeliveryAdjustmentResponse.from(it, ageing.ageOf(it)) }
     }
 }

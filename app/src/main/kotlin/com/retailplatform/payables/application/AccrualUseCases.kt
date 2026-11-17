@@ -60,7 +60,18 @@ data class PayablesProperties(
     /** A voucher for a vendor whose payment terms are not known yet falls due this many days after its invoice. */
     val defaultNetDays: Int = 30,
     val match: MatchProperties = MatchProperties(),
+    val ageing: AgeingProperties = AgeingProperties(),
 ) {
+    /** How many days each kind of open direct delivery item may wait for accounting before it is overdue. */
+    data class AgeingProperties(
+        /** An adjustment open for more than this many days since the correction that raised it is overdue. */
+        val adjustmentDays: Long = 30,
+        /** A late bill open for more than this many days since it was recorded is overdue. */
+        val lateBillDays: Long = 30,
+        /** A dispute open for more than this many days since the vendor's claim arrived is overdue. */
+        val disputeDays: Long = 30,
+    )
+
     /** How far an invoice line's cost may differ from the purchase order's and still match. */
     data class MatchProperties(
         /** The most a case cost may differ from the purchase order's, as a percentage of it. */
