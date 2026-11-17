@@ -396,6 +396,21 @@ class DirectStoreDeliveryFlowTest(
         mockMvc.get("/api/v1/payables/direct-delivery-late-bills?vendorId=$vendorId&openOnly=true").andExpect {
             jsonPath("$.total") { value(1) }
         }
+        // The late bill waits for accounting: it is in the open items list, recorded today and not overdue.
+        mockMvc.get("/api/v1/payables/direct-delivery-open-items?vendorId=$vendorId").andExpect {
+            status { isOk() }
+            jsonPath("$.total") { value(1) }
+            jsonPath("$.items[0].kind") { value("LATE_BILL") }
+            jsonPath("$.items[0].ageDays") { value(0) }
+            jsonPath("$.items[0].overdue") { value(false) }
+        }
+        mockMvc.get("/api/v1/payables/direct-delivery-open-items?overdueOnly=true&vendorId=$vendorId").andExpect {
+            jsonPath("$.total") { value(0) }
+        }
+        mockMvc.get(lateBill).andExpect {
+            jsonPath("$.ageDays") { value(0) }
+            jsonPath("$.overdue") { value(false) }
+        }
     }
 
     /** Nothing was paid short, so the vendor has no deduction notice and there is none to record as sent. */
