@@ -1,7 +1,9 @@
 package com.retailplatform.payables.adapter.`in`.web
 
 import com.retailplatform.payables.application.DeductionNoticeQueries
+import com.retailplatform.payables.application.ItemAge
 import com.retailplatform.payables.application.NoticeSent
+import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.RecordDeductionNoticeSent
 import com.retailplatform.payables.domain.DeductionLine
 import com.retailplatform.payables.domain.DeductionNotice
@@ -85,9 +87,15 @@ data class DeductionNoticeResponse(
     val sentBy: String?,
     val sentTo: String?,
     val sentRecordedBy: String?,
+    val ageDays: Long?,
+    val overdue: Boolean,
 ) {
     companion object {
-        fun from(notice: DeductionNotice): DeductionNoticeResponse {
+        /** [age] is how long the notice has waited to be sent; `null` once it was. */
+        fun from(
+            notice: DeductionNotice,
+            age: ItemAge?,
+        ): DeductionNoticeResponse {
             val invoice = notice.invoice
             return DeductionNoticeResponse(
                 id = notice.id.toString(),
@@ -106,6 +114,8 @@ data class DeductionNoticeResponse(
                 sentBy = notice.sending?.channel?.name,
                 sentTo = notice.sending?.recipient,
                 sentRecordedBy = notice.sending?.recordedBy,
+                ageDays = age?.days,
+                overdue = age?.overdue ?: false,
             )
         }
     }
@@ -116,6 +126,7 @@ data class DeductionNoticeResponse(
 class DeductionNoticeController(
     private val recordSent: RecordDeductionNoticeSent,
     private val queries: DeductionNoticeQueries,
+    private val ageing: OpenItemAgeing,
 ) {
     /** A vendor's deduction notices, the oldest first; only those not yet sent with `unsentOnly=true`. */
     @GetMapping("/deduction-notices")
@@ -126,13 +137,13 @@ class DeductionNoticeController(
         @RequestParam(required = false) size: Int?,
     ): PageResponse<DeductionNoticeResponse> {
         val vendor = mapRequest { VendorId.parse(vendorId) }
-        return PageResponse.from(queries.list(vendor, unsentOnly, pageQuery(page, size)), DeductionNoticeResponse::from)
+        return PageResponse.from(queries.list(vendor, unsentOnly, pageQuery(page, size)), ::response)
     }
 
     @GetMapping("/deduction-notices/{id}")
     fun get(
         @PathVariable id: String,
-    ): DeductionNoticeResponse = DeductionNoticeResponse.from(queries.find(noticeId(id)))
+    ): DeductionNoticeResponse = response(queries.find(noticeId(id)))
 
     /** The notice raised when an invoice was paid short. */
     @GetMapping("/direct-delivery-invoices/{invoiceId}/deduction-notice")
@@ -140,7 +151,7 @@ class DeductionNoticeController(
         @PathVariable invoiceId: String,
     ): DeductionNoticeResponse {
         val invoice = mapRequest { InvoiceId.parse(invoiceId) }
-        return DeductionNoticeResponse.from(queries.forInvoice(invoice))
+        return response(queries.forInvoice(invoice))
     }
 
     /** Records when, how, and to whom accounting sent a notice. The system sends nothing itself. */
@@ -151,8 +162,10 @@ class DeductionNoticeController(
     ): DeductionNoticeResponse {
         val noticeId = noticeId(id)
         recordSent.handle(noticeId, request.toSent())
-        return DeductionNoticeResponse.from(queries.find(noticeId))
+        return response(queries.find(noticeId))
     }
+
+    private fun response(notice: DeductionNotice) = DeductionNoticeResponse.from(notice, ageing.ageOf(notice))
 
     private fun noticeId(id: String): DeductionNoticeId = mapRequest { DeductionNoticeId.parse(id) }
 }

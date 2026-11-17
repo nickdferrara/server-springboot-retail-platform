@@ -13,7 +13,7 @@ import java.util.concurrent.atomic.AtomicReference
  * Counts the direct delivery items waiting for accounting, every five minutes unless configured otherwise, so an
  * alert rule can remind accounting of ones left open too long.
  *
- * Publishes two gauges, each tagged with `kind` (`adjustment`, `late-bill`, or `dispute`):
+ * Publishes two gauges, each tagged with `kind` (`adjustment`, `late-bill`, `dispute`, or `notice`):
  * - `retail.payables.open-items.open`: items still waiting;
  * - `retail.payables.open-items.overdue`: those of them that have waited longer than their kind allows.
  */

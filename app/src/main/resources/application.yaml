@@ -77,6 +77,9 @@ retail:
       adjustment-days: 30
       late-bill-days: 30
       dispute-days: 30
+      # A deduction notice waits for a clerk to send it, not for a decision, so it is overdue sooner: this many
+      # days after it was raised.
+      notice-days: 7
       # How often the open and overdue counts behind the retail.payables.open-items gauges are refreshed.
       monitor-interval: 5m
     match:

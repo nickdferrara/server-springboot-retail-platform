@@ -6,11 +6,13 @@ import com.retailplatform.payables.application.AcceptUnderBilledDirectDeliveryIn
 import com.retailplatform.payables.application.DeductionNoticeQueries
 import com.retailplatform.payables.application.EnterDirectDeliveryInvoice
 import com.retailplatform.payables.application.ItemAge
+import com.retailplatform.payables.application.NoticeSent
 import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.OpenItemFilter
 import com.retailplatform.payables.application.OpenItemKind
 import com.retailplatform.payables.application.OpenItemQueries
 import com.retailplatform.payables.application.RecordDeductionDispute
+import com.retailplatform.payables.application.RecordDeductionNoticeSent
 import com.retailplatform.payables.application.RecordDeliveryCorrection
 import com.retailplatform.payables.application.RecordDeliveryCorrectionCommand
 import com.retailplatform.payables.application.RecordDirectDelivery
@@ -23,6 +25,7 @@ import com.retailplatform.payables.domain.DeliveredTicket
 import com.retailplatform.payables.domain.DeliveryAdjustmentId
 import com.retailplatform.payables.domain.DisputeClaim
 import com.retailplatform.payables.domain.LateBillDetails
+import com.retailplatform.payables.domain.NoticeChannel
 import com.retailplatform.payables.domain.TicketAmountLine
 import com.retailplatform.payables.domain.TicketInvoiceDetails
 import com.retailplatform.payables.domain.TicketUnitChange
@@ -63,6 +66,7 @@ class OpenItemModuleTest(
     @Autowired private val recordLateBill: RecordLateBill,
     @Autowired private val recordDispute: RecordDeductionDispute,
     @Autowired private val writeOffAdjustment: WriteOffDeliveryAdjustment,
+    @Autowired private val recordSent: RecordDeductionNoticeSent,
     @Autowired private val openItems: OpenItemQueries,
     @Autowired private val ageing: OpenItemAgeing,
     @Autowired private val monitor: OpenItemMonitor,
@@ -102,12 +106,16 @@ class OpenItemModuleTest(
         )
 
         val all = openItems.list(OpenItemFilter(vendorId, overdueOnly = false), PageQuery.of()).items
-        all.map { it.item.kind } shouldBe listOf(OpenItemKind.ADJUSTMENT, OpenItemKind.LATE_BILL, OpenItemKind.DISPUTE)
+        // The short-pay also raised a deduction notice, which waits to be sent.
+        all.map { it.item.kind } shouldBe
+            listOf(OpenItemKind.ADJUSTMENT, OpenItemKind.NOTICE, OpenItemKind.LATE_BILL, OpenItemKind.DISPUTE)
         all.first().age shouldBe ItemAge(days = 40, overdue = true)
         all.first().item.amount shouldBe usd("1.25")
         all.first().item.ticketNumber shouldBe "T-151"
-        all.drop(1).map { it.age } shouldBe listOf(ItemAge(0, false), ItemAge(0, false))
-        all.drop(1).map { it.item.id }.toSet() shouldBe setOf(lateBill.value, dispute.value)
+        all.drop(1).map { it.age } shouldBe listOf(ItemAge(0, false), ItemAge(0, false), ItemAge(0, false))
+        val notice = notices.forInvoice(shortPaid.second)
+        all.drop(1).map { it.item.id } shouldBe listOf(notice.id.value, lateBill.value, dispute.value)
+        all[1].item.amount shouldBe usd("2.50")
         all.single { it.item.kind == OpenItemKind.DISPUTE }.item.amount shouldBe usd("2.50")
         val overdue = openItems.list(OpenItemFilter(vendorId, overdueOnly = true), PageQuery.of())
         overdue.total shouldBe 1
@@ -115,7 +123,16 @@ class OpenItemModuleTest(
             .single()
             .item.kind shouldBe OpenItemKind.ADJUSTMENT
         // Without a vendor the list covers every vendor.
-        openItems.list(OpenItemFilter(null, overdueOnly = false), PageQuery.of()).total shouldBeGreaterThanOrEqual 3
+        openItems.list(OpenItemFilter(null, overdueOnly = false), PageQuery.of()).total shouldBeGreaterThanOrEqual 4
+
+        // Once the notice is recorded as sent it no longer waits.
+        (gaugeAfterCheck("open", "notice") >= 1.0) shouldBe true
+        recordSent.handle(notice.id, NoticeSent(today, NoticeChannel.EMAIL, "ar@vendor.example"))
+        openItems
+            .list(OpenItemFilter(vendorId, overdueOnly = false), PageQuery.of())
+            .items
+            .none { it.item.kind == OpenItemKind.NOTICE } shouldBe true
+        ageing.ageOf(notices.find(notice.id)) shouldBe null
 
         // The gauges follow the counts; a settled item is no longer counted.
         val before = monitor.check().getValue(OpenItemKind.ADJUSTMENT)
@@ -131,11 +148,27 @@ class OpenItemModuleTest(
 
     @Test
     fun `an item is overdue once it has waited longer than its kind allows`() {
-        OpenItemKind.entries.forEach { kind ->
-            ageing.ageOf(kind, today.minusDays(30)) shouldBe ItemAge(30, overdue = false)
-            ageing.ageOf(kind, today.minusDays(31)) shouldBe ItemAge(31, overdue = true)
-            ageing.overdueBefore(kind) shouldBe today.minusDays(30)
+        val allowed =
+            mapOf(
+                OpenItemKind.ADJUSTMENT to 30L,
+                OpenItemKind.LATE_BILL to 30L,
+                OpenItemKind.DISPUTE to 30L,
+                OpenItemKind.NOTICE to 7L,
+            )
+        allowed.keys shouldBe OpenItemKind.entries.toSet()
+        allowed.forEach { (kind, days) ->
+            ageing.ageOf(kind, today.minusDays(days)) shouldBe ItemAge(days, overdue = false)
+            ageing.ageOf(kind, today.minusDays(days + 1)) shouldBe ItemAge(days + 1, overdue = true)
+            ageing.overdueBefore(kind) shouldBe today.minusDays(days)
         }
+    }
+
+    private fun gaugeAfterCheck(
+        state: String,
+        kind: String,
+    ): Double {
+        monitor.check()
+        return gauge(state, kind)
     }
 
     private fun gauge(

@@ -1,6 +1,7 @@
 package com.retailplatform.payables.application
 
 import com.retailplatform.payables.domain.DeductionDispute
+import com.retailplatform.payables.domain.DeductionNotice
 import com.retailplatform.payables.domain.DeliveryAdjustment
 import com.retailplatform.payables.domain.DisputeStatus
 import com.retailplatform.payables.domain.LateBill
@@ -17,8 +18,11 @@ import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
 import java.util.UUID
 
-/** The kinds of direct delivery item that wait for accounting to decide. */
-enum class OpenItemKind { ADJUSTMENT, LATE_BILL, DISPUTE }
+/**
+ * The kinds of direct delivery item that wait for accounting: three for a manager to decide, and a deduction
+ * notice for a clerk to send.
+ */
+enum class OpenItemKind { ADJUSTMENT, LATE_BILL, DISPUTE, NOTICE }
 
 /** How long an item has waited, in days, and whether that is longer than its kind allows. */
 data class ItemAge(
@@ -28,7 +32,8 @@ data class ItemAge(
 
 /**
  * Works out how long an open item has waited and whether it is overdue. An adjustment waits since the
- * correction that raised it, a late bill since it was recorded, and a dispute since the vendor's claim arrived.
+ * correction that raised it, a late bill since it was recorded, a dispute since the vendor's claim arrived, and a
+ * deduction notice since it was raised.
  */
 @Component
 class OpenItemAgeing(
@@ -55,6 +60,10 @@ class OpenItemAgeing(
     fun ageOf(dispute: DeductionDispute): ItemAge? =
         if (dispute.status == DisputeStatus.Open) ageOf(OpenItemKind.DISPUTE, dispute.claim.receivedOn) else null
 
+    /** How long [notice] has waited to be sent; `null` once it was. */
+    fun ageOf(notice: DeductionNotice): ItemAge? =
+        if (notice.sending == null) ageOf(OpenItemKind.NOTICE, notice.raisedOn) else null
+
     /** An item of [kind] is overdue if it has been open since before this day. */
     fun overdueBefore(kind: OpenItemKind): BusinessDate = BusinessDate.today(clock).minusDays(allowedDays(kind))
 
@@ -63,12 +72,13 @@ class OpenItemAgeing(
             OpenItemKind.ADJUSTMENT -> properties.ageing.adjustmentDays
             OpenItemKind.LATE_BILL -> properties.ageing.lateBillDays
             OpenItemKind.DISPUTE -> properties.ageing.disputeDays
+            OpenItemKind.NOTICE -> properties.ageing.noticeDays
         }
 }
 
 /**
- * One item waiting for accounting, whatever its kind: [amount] is the adjustment's, the late bill's, or the
- * deduction a dispute contests, and [openSince] is the day it started to wait.
+ * One item waiting for accounting, whatever its kind: [amount] is the adjustment's, the late bill's, the
+ * deduction a dispute contests, or the deduction a notice tells of, and [openSince] is the day it started to wait.
  */
 data class OpenItem(
     val kind: OpenItemKind,
@@ -98,7 +108,7 @@ data class OpenItemFilter(
     val overdueOnly: Boolean,
 )
 
-/** Port: reads the items waiting for accounting across adjustments, late bills, and disputes. */
+/** Port: reads the items waiting for accounting across adjustments, late bills, disputes, and unsent notices. */
 interface OpenItemReader {
     /** Open items, the one that has waited longest first. [overdueBefore] gives each kind's overdue day. */
     fun find(
