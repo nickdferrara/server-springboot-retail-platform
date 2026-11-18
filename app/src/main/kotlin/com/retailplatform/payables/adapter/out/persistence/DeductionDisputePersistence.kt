@@ -7,6 +7,7 @@ import com.retailplatform.payables.domain.DeductionDisputeId
 import com.retailplatform.payables.domain.DeductionNoticeId
 import com.retailplatform.payables.domain.DeductionNoticeNumber
 import com.retailplatform.payables.domain.DisputeClaim
+import com.retailplatform.payables.domain.DisputeReopening
 import com.retailplatform.payables.domain.DisputeStatus
 import com.retailplatform.payables.domain.DisputedDeduction
 import com.retailplatform.payables.domain.MatchOverride
@@ -22,6 +23,7 @@ import org.springframework.data.annotation.Id
 import org.springframework.data.annotation.Version
 import org.springframework.data.jdbc.repository.query.Query
 import org.springframework.data.relational.core.mapping.Embedded
+import org.springframework.data.relational.core.mapping.MappedCollection
 import org.springframework.data.relational.core.mapping.Table
 import org.springframework.data.repository.CrudRepository
 import org.springframework.stereotype.Repository
@@ -52,34 +54,58 @@ data class DeductionDisputeEntity(
     val decidedBy: String?,
     val decisionReason: String?,
     val conceded: BigDecimal?,
+    @MappedCollection(idColumn = "deduction_dispute_id", keyColumn = "position")
+    val reopenings: List<DisputeReopeningEntity>,
     @Version val version: Int = 0,
     @Embedded.Empty val audit: AuditMetadata = AuditMetadata(),
 )
 
-interface DeductionDisputeJdbcRepository : CrudRepository<DeductionDisputeEntity, UUID> {
-    fun findByDeductionNoticeId(deductionNoticeId: UUID): DeductionDisputeEntity?
+@Table(schema = "payables", name = "deduction_dispute_reopening")
+data class DisputeReopeningEntity(
+    val decidedOn: LocalDate,
+    val decidedBy: String,
+    val decisionReason: String,
+    val reopenedOn: LocalDate,
+    val reopenedBy: String,
+    val reason: String,
+)
 
-    fun findByVendorIdAndStoreIdAndTicketNumber(
+interface DeductionDisputeJdbcRepository : CrudRepository<DeductionDisputeEntity, UUID> {
+    @Query(
+        "SELECT id FROM payables.deduction_dispute WHERE deduction_notice_id = :deductionNoticeId " +
+            "AND status <> 'WITHDRAWN'",
+    )
+    fun findStandingIdByNotice(deductionNoticeId: UUID): UUID?
+
+    @Query(
+        "SELECT id FROM payables.deduction_dispute WHERE vendor_id = :vendorId AND store_id = :storeId " +
+            "AND ticket_number = :ticketNumber AND status <> 'WITHDRAWN'",
+    )
+    fun findStandingIdByTicket(
         vendorId: UUID,
         storeId: UUID,
         ticketNumber: String,
-    ): DeductionDisputeEntity?
+    ): UUID?
 
-    fun existsByVendorIdAndVendorReference(
+    @Query(
+        "SELECT count(*) > 0 FROM payables.deduction_dispute WHERE vendor_id = :vendorId " +
+            "AND vendor_reference = :vendorReference AND status <> 'WITHDRAWN'",
+    )
+    fun existsStandingReference(
         vendorId: UUID,
         vendorReference: String,
     ): Boolean
 
     @Query(
-        "SELECT * FROM payables.deduction_dispute WHERE vendor_id = :vendorId " +
+        "SELECT id FROM payables.deduction_dispute WHERE vendor_id = :vendorId " +
             "AND (NOT :openOnly OR status = 'OPEN') ORDER BY recorded_on, id LIMIT :limit OFFSET :offset",
     )
-    fun findByVendor(
+    fun findIdsByVendor(
         vendorId: UUID,
         openOnly: Boolean,
         limit: Int,
         offset: Long,
-    ): List<DeductionDisputeEntity>
+    ): List<UUID>
 
     @Query(
         "SELECT count(*) FROM payables.deduction_dispute WHERE vendor_id = :vendorId " +
@@ -90,6 +116,24 @@ interface DeductionDisputeJdbcRepository : CrudRepository<DeductionDisputeEntity
         openOnly: Boolean,
     ): Long
 }
+
+private fun DisputeReopening.toEntity() =
+    DisputeReopeningEntity(
+        decidedOn = decidedOn.value,
+        decidedBy = upheld.approvedBy,
+        decisionReason = upheld.reason,
+        reopenedOn = reopenedOn.value,
+        reopenedBy = decision.approvedBy,
+        reason = decision.reason,
+    )
+
+private fun DisputeReopeningEntity.toDomain() =
+    DisputeReopening(
+        BusinessDate(decidedOn),
+        MatchOverride.of(decidedBy, decisionReason),
+        BusinessDate(reopenedOn),
+        MatchOverride.of(reopenedBy, reason),
+    )
 
 @Repository
 class JdbcDeductionDisputeRepository(
@@ -122,6 +166,7 @@ class JdbcDeductionDisputeRepository(
                 decidedBy = decision?.second?.approvedBy,
                 decisionReason = decision?.second?.reason,
                 conceded = (dispute.status as? DisputeStatus.Conceded)?.amount?.amount,
+                reopenings = dispute.reopenings.map { it.toEntity() },
                 version = dispute.version,
                 audit = audit,
             ),
@@ -132,17 +177,17 @@ class JdbcDeductionDisputeRepository(
         disputes.findById(id.value).getOrNull()?.toDomain()
 
     override fun findByNotice(noticeId: DeductionNoticeId): DeductionDispute? =
-        disputes.findByDeductionNoticeId(noticeId.value)?.toDomain()
+        disputes.findStandingIdByNotice(noticeId.value)?.let(::load)
 
     override fun findByTicket(ticket: BilledTicket): DeductionDispute? =
         disputes
-            .findByVendorIdAndStoreIdAndTicketNumber(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
-            ?.toDomain()
+            .findStandingIdByTicket(ticket.vendorId.value, ticket.storeId.value, ticket.ticketNumber)
+            ?.let(::load)
 
     override fun existsReference(
         vendorId: VendorId,
         reference: VendorInvoiceNumber,
-    ): Boolean = disputes.existsByVendorIdAndVendorReference(vendorId.value, reference.value)
+    ): Boolean = disputes.existsStandingReference(vendorId.value, reference.value)
 
     override fun findByVendor(
         vendorId: VendorId,
@@ -150,17 +195,23 @@ class JdbcDeductionDisputeRepository(
         query: PageQuery,
     ): Page<DeductionDispute> =
         Page(
-            disputes.findByVendor(vendorId.value, openOnly, query.size, query.offset).map { it.toDomain() },
+            disputes.findIdsByVendor(vendorId.value, openOnly, query.size, query.offset).mapNotNull(::load),
             query.page,
             query.size,
             disputes.countByVendor(vendorId.value, openOnly),
         )
 
-    /** The day a status decided the dispute and who decided; `null` while it waits. */
+    private fun load(id: UUID): DeductionDispute? = disputes.findById(id).getOrNull()?.toDomain()
+
+    /**
+     * The day a status ended the dispute's wait and who ended it; `null` while it waits. A withdrawal is kept in
+     * the decision columns, since a withdrawn dispute was never decided.
+     */
     private fun DisputeStatus.decision(): Pair<BusinessDate, MatchOverride>? =
         when (this) {
             is DisputeStatus.Upheld -> decidedOn to decision
             is DisputeStatus.Conceded -> decidedOn to decision
+            is DisputeStatus.Withdrawn -> withdrawnOn to decision
             DisputeStatus.Open -> null
         }
 
@@ -181,15 +232,19 @@ class JdbcDeductionDisputeRepository(
             recordedOn = BusinessDate(recordedOn),
             status = status(money),
             version = version,
+            reopenings = reopenings.map { it.toDomain() },
         )
     }
 
-    /** The decision columns are filled together, so the day it was decided says whether it was. */
+    /** The decision columns are filled together, so the day it was decided says whether it still waits. */
     private fun DeductionDisputeEntity.status(money: Currency): DisputeStatus {
         val day = decidedOn ?: return DisputeStatus.Open
         val decision = MatchOverride.of(checkNotNull(decidedBy), checkNotNull(decisionReason))
-        return conceded
-            ?.let { DisputeStatus.Conceded(BusinessDate(day), decision, Money.of(it, money)) }
-            ?: DisputeStatus.Upheld(BusinessDate(day), decision)
+        val amount = conceded
+        return when {
+            status == "WITHDRAWN" -> DisputeStatus.Withdrawn(BusinessDate(day), decision)
+            amount != null -> DisputeStatus.Conceded(BusinessDate(day), decision, Money.of(amount, money))
+            else -> DisputeStatus.Upheld(BusinessDate(day), decision)
+        }
     }
 }

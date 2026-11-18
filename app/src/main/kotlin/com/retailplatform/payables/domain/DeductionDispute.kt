@@ -88,11 +88,35 @@ sealed interface DisputeStatus {
     ) : DisputeStatus {
         override val code = "CONCEDED"
     }
+
+    /**
+     * Recorded in error and taken back on [withdrawnOn]; [decision] says who withdrew it and why. It stays on
+     * record, and the deduction can be disputed again.
+     */
+    data class Withdrawn(
+        val withdrawnOn: BusinessDate,
+        val decision: MatchOverride,
+    ) : DisputeStatus {
+        override val code = "WITHDRAWN"
+    }
 }
 
 /**
- * A vendor's dispute of a deduction. Accounting decides it once: the deduction is upheld, or some or all of it
- * is conceded and paid. The person who made the deduction does not decide the challenge to it.
+ * A decision to uphold that was set aside: [upheld] is who upheld the deduction and why, on [decidedOn], and
+ * [decision] who reopened the dispute and why, on [reopenedOn].
+ */
+data class DisputeReopening(
+    val decidedOn: BusinessDate,
+    val upheld: MatchOverride,
+    val reopenedOn: BusinessDate,
+    val decision: MatchOverride,
+)
+
+/**
+ * A vendor's dispute of a deduction. Accounting decides it: the deduction is upheld, or some or all of it is
+ * conceded and paid. The person who made the deduction does not decide the challenge to it. A dispute that was
+ * upheld can be reopened and decided again; the decisions set aside are kept in [reopenings], the earliest first.
+ * One recorded in error is withdrawn while it waits.
  */
 data class DeductionDispute(
     val id: DeductionDisputeId,
@@ -102,11 +126,13 @@ data class DeductionDispute(
     val recordedOn: BusinessDate,
     val status: DisputeStatus = DisputeStatus.Open,
     val version: Int = 0,
+    val reopenings: List<DisputeReopening> = emptyList(),
 ) {
     /**
      * The dispute decided against the vendor, on the word of [decision].
      *
-     * @throws DisputeAlreadyDecided if it was decided before.
+     * @throws DisputeAlreadyDecided if it has been decided.
+     * @throws DisputeWithdrawn if it was withdrawn.
      * @throws DisputeDecidedByDeductor if [decision] comes from the person who paid the invoice short.
      */
     fun uphold(
@@ -120,7 +146,8 @@ data class DeductionDispute(
     /**
      * The dispute decided for the vendor to the extent of [amount], on the word of [decision].
      *
-     * @throws DisputeAlreadyDecided if it was decided before.
+     * @throws DisputeAlreadyDecided if it has been decided.
+     * @throws DisputeWithdrawn if it was withdrawn.
      * @throws DisputeDecidedByDeductor if [decision] comes from the person who paid the invoice short.
      * @throws ConcessionOutOfRange unless [amount] is more than nothing, no more than the deduction, and in its
      * currency.
@@ -140,6 +167,38 @@ data class DeductionDispute(
         }
         if (amount > concedable) throw DeductionAlreadyRecovered(deduction.noticeNumber, concedable)
         return copy(status = DisputeStatus.Conceded(BusinessDate.today(clock), decision, amount))
+    }
+
+    /**
+     * The dispute waiting again, its decision to uphold set aside on the word of [decision]. It waits since the
+     * day the vendor's claim arrived, as before.
+     *
+     * @throws DisputeNotUpheld unless the deduction was upheld; what was conceded has been released for payment.
+     * @throws DisputeDecidedByDeductor if [decision] comes from the person who paid the invoice short.
+     */
+    fun reopen(
+        decision: MatchOverride,
+        clock: Clock,
+    ): DeductionDispute {
+        val upheld = status as? DisputeStatus.Upheld ?: throw DisputeNotUpheld(deduction.noticeNumber)
+        if (decision.approvedBy == deduction.deductedBy) throw DisputeDecidedByDeductor(deduction.noticeNumber)
+        val reopening = DisputeReopening(upheld.decidedOn, upheld.decision, BusinessDate.today(clock), decision)
+        return copy(status = DisputeStatus.Open, reopenings = reopenings + reopening)
+    }
+
+    /**
+     * The dispute taken back as recorded in error, on the word of [decision]. The deduction can then be disputed
+     * again, under the same reference if need be.
+     *
+     * @throws DisputeAlreadyDecided if it has been decided; an upheld dispute is reopened first.
+     * @throws DisputeWithdrawn if it was withdrawn before.
+     */
+    fun withdraw(
+        decision: MatchOverride,
+        clock: Clock,
+    ): DeductionDispute {
+        requireOpen()
+        return copy(status = DisputeStatus.Withdrawn(BusinessDate.today(clock), decision))
     }
 
     /**
@@ -185,8 +244,13 @@ data class DeductionDispute(
     private fun conceded(): DisputeStatus.Conceded =
         status as? DisputeStatus.Conceded ?: error("Dispute of notice ${deduction.noticeNumber} was not conceded")
 
-    private fun requireDecidable(decision: MatchOverride) {
+    private fun requireOpen() {
+        if (status is DisputeStatus.Withdrawn) throw DisputeWithdrawn(deduction.noticeNumber)
         if (status != DisputeStatus.Open) throw DisputeAlreadyDecided(deduction.noticeNumber)
+    }
+
+    private fun requireDecidable(decision: MatchOverride) {
+        requireOpen()
         if (decision.approvedBy == deduction.deductedBy) throw DisputeDecidedByDeductor(deduction.noticeNumber)
     }
 
@@ -230,11 +294,25 @@ class DisputeAlreadyDecided(
         "The dispute of notice $number has already been decided",
     )
 
+class DisputeWithdrawn(
+    number: DeductionNoticeNumber,
+) : BusinessRuleViolation(
+        "payables.dispute-withdrawn",
+        "The dispute of notice $number was withdrawn",
+    )
+
+class DisputeNotUpheld(
+    number: DeductionNoticeNumber,
+) : BusinessRuleViolation(
+        "payables.dispute-not-upheld",
+        "The dispute of notice $number can be reopened only after the deduction was upheld",
+    )
+
 class DisputeDecidedByDeductor(
     number: DeductionNoticeNumber,
 ) : BusinessRuleViolation(
         "payables.dispute-decided-by-deductor",
-        "The dispute of notice $number cannot be decided by the person who paid the invoice short",
+        "The dispute of notice $number cannot be decided or reopened by the person who paid the invoice short",
     )
 
 class ConcessionOutOfRange(
