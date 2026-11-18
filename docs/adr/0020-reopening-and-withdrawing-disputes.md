@@ -5,8 +5,10 @@ Date: 2026-11-18
 ## Status
 
 Accepted. Amends ADR 14, under which a dispute was decided once and one recorded in error could only be upheld.
-Who may reopen and withdraw, and that a conceded dispute stays closed, are working defaults that the business
-has not yet confirmed.
+The business confirmed on 2026-11-18 that any `Accounting.Clerk` withdraws a dispute that still waits; that a
+decided dispute is reopened before it is withdrawn; that an `Accounting.Manager` other than the one who paid the
+invoice short reopens an upheld dispute, the manager who upheld it included; that a conceded dispute is neither
+reopened nor withdrawn; and that a reopened dispute keeps its age from the day the vendor's claim arrived.
 
 ## Context
 
