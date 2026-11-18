@@ -76,6 +76,49 @@ class DeductionDisputeTest {
         }
     }
 
+    @Test
+    fun `an upheld dispute is reopened by someone other than the deductor and decided again`() {
+        val upheld = recorded().uphold(other, clock)
+        val again = MatchOverride.of("controller", "Vendor sent the signed ticket")
+
+        shouldThrow<DisputeDecidedByDeductor> { upheld.reopen(MatchOverride.of("manager", "Let me look"), clock) }
+        val reopened = upheld.reopen(again, clock)
+
+        reopened.status shouldBe DisputeStatus.Open
+        reopened.reopenings shouldBe listOf(DisputeReopening(today, other, today, again))
+        shouldThrow<DisputeNotUpheld> { reopened.reopen(again, clock) }
+        val conceded = reopened.concede(usd("1.26"), other, clock)
+        conceded.reopenings shouldBe reopened.reopenings
+        shouldThrow<DisputeNotUpheld> { conceded.reopen(again, clock) }
+        // Upheld and reopened a second time, both decisions set aside are kept in order.
+        reopened
+            .uphold(other, clock)
+            .reopen(again, clock)
+            .reopenings.size shouldBe 2
+    }
+
+    @Test
+    fun `a dispute is withdrawn only while it waits`() {
+        val dispute = recorded()
+        val mistake = MatchOverride.of("clerk", "Recorded against the wrong notice")
+
+        val withdrawn = dispute.withdraw(mistake, clock)
+
+        withdrawn.status shouldBe DisputeStatus.Withdrawn(today, mistake)
+        shouldThrow<DisputeWithdrawn> { withdrawn.withdraw(mistake, clock) }
+        shouldThrow<DisputeWithdrawn> { withdrawn.uphold(other, clock) }
+        shouldThrow<DisputeWithdrawn> { withdrawn.concede(usd("1.26"), other, clock) }
+        shouldThrow<DisputeNotUpheld> { withdrawn.reopen(other, clock) }
+        shouldThrow<DisputeAlreadyDecided> { dispute.uphold(other, clock).withdraw(mistake, clock) }
+        shouldThrow<DisputeAlreadyDecided> { dispute.concede(usd("1.26"), other, clock).withdraw(mistake, clock) }
+        // An upheld dispute is reopened first, then withdrawn; the decision set aside stays on it.
+        dispute
+            .uphold(other, clock)
+            .reopen(other, clock)
+            .withdraw(mistake, clock)
+            .reopenings.size shouldBe 1
+    }
+
     private fun recorded() = DeductionDispute.record(deduction, claim(today.minusDays(1)), "clerk", clock)
 
     private fun claim(receivedOn: BusinessDate) =

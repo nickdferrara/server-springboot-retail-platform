@@ -5,11 +5,14 @@ import com.retailplatform.payables.application.DeductionDisputeQueries
 import com.retailplatform.payables.application.ItemAge
 import com.retailplatform.payables.application.OpenItemAgeing
 import com.retailplatform.payables.application.RecordDeductionDispute
+import com.retailplatform.payables.application.ReopenDeductionDispute
 import com.retailplatform.payables.application.UpholdDeduction
+import com.retailplatform.payables.application.WithdrawDeductionDispute
 import com.retailplatform.payables.domain.DeductionDispute
 import com.retailplatform.payables.domain.DeductionDisputeId
 import com.retailplatform.payables.domain.DeductionNoticeId
 import com.retailplatform.payables.domain.DisputeClaim
+import com.retailplatform.payables.domain.DisputeReopening
 import com.retailplatform.payables.domain.DisputeStatus
 import com.retailplatform.payables.domain.MatchOverride
 import com.retailplatform.payables.domain.VendorInvoiceNumber
@@ -60,7 +63,32 @@ data class ConcedeDeductionRequest(
     val reason: String?,
 )
 
-/** A vendor's dispute of a deduction, and what accounting decided. */
+/** A decision to uphold that was set aside when the dispute was reopened. */
+data class DisputeReopeningResponse(
+    val decidedOn: LocalDate,
+    val decidedBy: String,
+    val decisionReason: String,
+    val reopenedOn: LocalDate,
+    val reopenedBy: String,
+    val reason: String,
+) {
+    companion object {
+        fun from(reopening: DisputeReopening) =
+            DisputeReopeningResponse(
+                decidedOn = reopening.decidedOn.value,
+                decidedBy = reopening.upheld.approvedBy,
+                decisionReason = reopening.upheld.reason,
+                reopenedOn = reopening.reopenedOn.value,
+                reopenedBy = reopening.decision.approvedBy,
+                reason = reopening.decision.reason,
+            )
+    }
+}
+
+/**
+ * A vendor's dispute of a deduction, and what accounting decided. The withdrawal fields are filled only for a
+ * dispute withdrawn as recorded in error, and [reopenings] lists the decisions set aside, the earliest first.
+ */
 data class DeductionDisputeResponse(
     val id: String,
     val deductionNoticeId: String,
@@ -82,6 +110,10 @@ data class DeductionDisputeResponse(
     val concedable: MoneyDto?,
     val ageDays: Long?,
     val overdue: Boolean,
+    val withdrawnOn: LocalDate?,
+    val withdrawnBy: String?,
+    val withdrawalReason: String?,
+    val reopenings: List<DisputeReopeningResponse>,
 ) {
     companion object {
         /**
@@ -97,8 +129,9 @@ data class DeductionDisputeResponse(
                 when (val status = dispute.status) {
                     is DisputeStatus.Upheld -> status.decidedOn to status.decision
                     is DisputeStatus.Conceded -> status.decidedOn to status.decision
-                    DisputeStatus.Open -> null
+                    is DisputeStatus.Withdrawn, DisputeStatus.Open -> null
                 }
+            val withdrawn = dispute.status as? DisputeStatus.Withdrawn
             val deduction = dispute.deduction
             return DeductionDisputeResponse(
                 id = dispute.id.toString(),
@@ -121,6 +154,10 @@ data class DeductionDisputeResponse(
                 concedable = concedable?.let(MoneyDto::from),
                 ageDays = age?.days,
                 overdue = age?.overdue ?: false,
+                withdrawnOn = withdrawn?.withdrawnOn?.value,
+                withdrawnBy = withdrawn?.decision?.approvedBy,
+                withdrawalReason = withdrawn?.decision?.reason,
+                reopenings = dispute.reopenings.map(DisputeReopeningResponse::from),
             )
         }
     }
@@ -132,10 +169,15 @@ class DeductionDisputeController(
     private val recordDispute: RecordDeductionDispute,
     private val upholdDeduction: UpholdDeduction,
     private val concedeDeduction: ConcedeDeduction,
+    private val reopenDispute: ReopenDeductionDispute,
+    private val withdrawDispute: WithdrawDeductionDispute,
     private val queries: DeductionDisputeQueries,
     private val ageing: OpenItemAgeing,
 ) {
-    /** Records that the vendor disputes the deduction a notice told it of. A deduction is disputed once. */
+    /**
+     * Records that the vendor disputes the deduction a notice told it of. A deduction has one dispute at a time;
+     * it is disputed again only after the earlier dispute was withdrawn.
+     */
     @PostMapping("/deduction-notices/{noticeId}/dispute")
     fun record(
         @PathVariable noticeId: String,
@@ -148,7 +190,7 @@ class DeductionDisputeController(
             .body(response(queries.find(id)))
     }
 
-    /** The dispute of the deduction a notice told the vendor of. */
+    /** The dispute of the deduction a notice told the vendor of; one that was withdrawn is not found here. */
     @GetMapping("/deduction-notices/{noticeId}/dispute")
     fun forNotice(
         @PathVariable noticeId: String,
@@ -157,7 +199,7 @@ class DeductionDisputeController(
         return response(queries.forNotice(notice))
     }
 
-    /** A vendor's disputes, the oldest first; only those still waiting with `openOnly=true`. */
+    /** A vendor's disputes, withdrawn ones included, the oldest first; only those waiting with `openOnly=true`. */
     @GetMapping("/deduction-disputes")
     fun list(
         @RequestParam vendorId: String,
@@ -200,6 +242,34 @@ class DeductionDisputeController(
         val disputeId = disputeId(id)
         val amount = mapRequest { requireNotNull(request.amount).toDomain() }
         concedeDeduction.handle(disputeId, amount, requireNotNull(request.reason))
+        return response(queries.find(disputeId))
+    }
+
+    /**
+     * Reopens a dispute that was upheld: it waits for a decision again and the decision set aside stays on
+     * record. For an accounting manager other than the one who paid the invoice short.
+     */
+    @PostMapping("/deduction-disputes/{id}/reopen")
+    fun reopen(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): DeductionDisputeResponse {
+        val disputeId = disputeId(id)
+        reopenDispute.handle(disputeId, requireNotNull(request.reason))
+        return response(queries.find(disputeId))
+    }
+
+    /**
+     * Withdraws a dispute that was recorded in error and still waits: it stays on record and the deduction can
+     * be disputed again. For an accounting clerk.
+     */
+    @PostMapping("/deduction-disputes/{id}/withdraw")
+    fun withdraw(
+        @PathVariable id: String,
+        @Valid @RequestBody request: OverrideMatchExceptionRequest,
+    ): DeductionDisputeResponse {
+        val disputeId = disputeId(id)
+        withdrawDispute.handle(disputeId, requireNotNull(request.reason))
         return response(queries.find(disputeId))
     }
 

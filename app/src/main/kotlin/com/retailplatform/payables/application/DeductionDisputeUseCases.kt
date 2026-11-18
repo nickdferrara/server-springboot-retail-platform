@@ -16,7 +16,9 @@ import com.retailplatform.payables.domain.DisputeAlreadyDecided
 import com.retailplatform.payables.domain.DisputeClaim
 import com.retailplatform.payables.domain.DisputeDateInvalid
 import com.retailplatform.payables.domain.DisputeDecidedByDeductor
+import com.retailplatform.payables.domain.DisputeNotUpheld
 import com.retailplatform.payables.domain.DisputeStatus
+import com.retailplatform.payables.domain.DisputeWithdrawn
 import com.retailplatform.payables.domain.DisputedDeduction
 import com.retailplatform.payables.domain.InvoiceAlreadyEntered
 import com.retailplatform.payables.domain.MatchOverride
@@ -36,26 +38,29 @@ import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
 import java.time.Clock
 
-/** Port: where vendors' disputes of deductions are kept, one per deduction notice. */
+/**
+ * Port: where vendors' disputes of deductions are kept. A deduction notice has at most one dispute that stands;
+ * those withdrawn as recorded in error are kept beside it.
+ */
 interface DeductionDisputeRepository {
     /** Inserts a new dispute or updates an existing one; a stale version is refused. */
     fun save(dispute: DeductionDispute)
 
     fun findById(id: DeductionDisputeId): DeductionDispute?
 
-    /** The dispute of the deduction a notice told the vendor of, if the vendor disputed it. */
+    /** The dispute that stands of the deduction a notice told the vendor of, if there is one. */
     fun findByNotice(noticeId: DeductionNoticeId): DeductionDispute?
 
-    /** The dispute of the deduction on a vendor's ticket at a store, if there is one. */
+    /** The dispute that stands of the deduction on a vendor's ticket at a store, if there is one. */
     fun findByTicket(ticket: BilledTicket): DeductionDispute?
 
-    /** Whether the vendor disputed a deduction under its claim [reference]. */
+    /** Whether a dispute that stands is under the vendor's claim [reference]. */
     fun existsReference(
         vendorId: VendorId,
         reference: VendorInvoiceNumber,
     ): Boolean
 
-    /** A vendor's disputes, the oldest first; only those still waiting if [openOnly]. */
+    /** A vendor's disputes, withdrawn ones included, the oldest first; only those still waiting if [openOnly]. */
     fun findByVendor(
         vendorId: VendorId,
         openOnly: Boolean,
@@ -104,7 +109,8 @@ class DeductionRecoveryGuard(
 
 /**
  * Use case: record that a vendor disputes a deduction. A clerk records when the claim arrived, the vendor's
- * reference for it, and what the vendor says, against the deduction notice. A deduction is disputed once.
+ * reference for it, and what the vendor says, against the deduction notice. A deduction has one dispute at a
+ * time: it is disputed again only after the earlier dispute was withdrawn.
  */
 @Service
 class RecordDeductionDispute(
@@ -116,7 +122,7 @@ class RecordDeductionDispute(
     private val clock: Clock,
 ) {
     /**
-     * @throws DeductionAlreadyDisputed if the deduction was disputed before.
+     * @throws DeductionAlreadyDisputed if the deduction has a dispute that was not withdrawn.
      * @throws DisputeDateInvalid if the claim arrived before the deduction was made, or after today.
      * @throws InvoiceAlreadyEntered if the vendor's reference was already used for another of its documents.
      */
@@ -170,7 +176,8 @@ class UpholdDeduction(
     private val clock: Clock,
 ) {
     /**
-     * @throws DisputeAlreadyDecided if the dispute was decided before.
+     * @throws DisputeAlreadyDecided if the dispute has been decided.
+     * @throws DisputeWithdrawn if the dispute was withdrawn.
      * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
      */
     @RequiresRole(Roles.ACCOUNTING_MANAGER)
@@ -199,7 +206,8 @@ class ConcedeDeduction(
     private val clock: Clock,
 ) {
     /**
-     * @throws DisputeAlreadyDecided if the dispute was decided before.
+     * @throws DisputeAlreadyDecided if the dispute has been decided.
+     * @throws DisputeWithdrawn if the dispute was withdrawn.
      * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
      * @throws ConcessionOutOfRange unless [amount] is more than nothing and no more than was held back.
      * @throws DeductionAlreadyRecovered if a correction to the store's receipt already covers part of [amount].
@@ -221,6 +229,59 @@ class ConcedeDeduction(
     }
 }
 
+/**
+ * Use case: reopen a dispute that was upheld, because the vendor came back with more or the decision was recorded
+ * wrongly. An accounting manager other than the one who paid the invoice short says why. The dispute waits again,
+ * since the day the vendor's claim arrived, and the decision set aside stays on it. A conceded dispute is not
+ * reopened: its voucher has been released.
+ */
+@Service
+class ReopenDeductionDispute(
+    private val disputes: DeductionDisputeRepository,
+    private val currentUser: CurrentUser,
+    private val clock: Clock,
+) {
+    /**
+     * @throws DisputeNotUpheld unless the deduction was upheld.
+     * @throws DisputeDecidedByDeductor if the person asking paid the invoice short.
+     */
+    @RequiresRole(Roles.ACCOUNTING_MANAGER)
+    @Transactional
+    fun handle(
+        id: DeductionDisputeId,
+        reason: String,
+    ) {
+        val dispute = disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
+        disputes.save(dispute.reopen(MatchOverride.of(currentUser.name, reason), clock))
+    }
+}
+
+/**
+ * Use case: withdraw a dispute that was recorded in error, for example against the wrong notice or under the
+ * wrong reference. A clerk says why, while the dispute still waits. It stays on record, no longer waits for
+ * accounting, and the deduction can be disputed again.
+ */
+@Service
+class WithdrawDeductionDispute(
+    private val disputes: DeductionDisputeRepository,
+    private val currentUser: CurrentUser,
+    private val clock: Clock,
+) {
+    /**
+     * @throws DisputeAlreadyDecided if the dispute has been decided.
+     * @throws DisputeWithdrawn if the dispute was withdrawn before.
+     */
+    @RequiresRole(Roles.ACCOUNTING_CLERK)
+    @Transactional
+    fun handle(
+        id: DeductionDisputeId,
+        reason: String,
+    ) {
+        val dispute = disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
+        disputes.save(dispute.withdraw(MatchOverride.of(currentUser.name, reason), clock))
+    }
+}
+
 /** Queries: disputes by identifier, by deduction notice, and by vendor. */
 @Service
 @Transactional(readOnly = true)
@@ -235,6 +296,7 @@ class DeductionDisputeQueries(
     fun find(id: DeductionDisputeId): DeductionDispute =
         disputes.findById(id) ?: throw ResourceNotFound("Deduction dispute", id.toString())
 
+    /** The dispute of a notice's deduction that stands; one that was withdrawn is found by its identifier. */
     fun forNotice(noticeId: DeductionNoticeId): DeductionDispute =
         disputes.findByNotice(noticeId) ?: throw ResourceNotFound("Dispute of deduction notice", noticeId.toString())
 
